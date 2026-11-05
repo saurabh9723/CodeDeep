@@ -29,6 +29,7 @@ type Event struct {
 	Type        string          `json:"type"`
 	SessionID   string          `json:"session_id,omitempty"`
 	Text        string          `json:"text,omitempty"`
+	Images      []llm.Image     `json:"images,omitempty"`
 	Name        string          `json:"name,omitempty"`
 	Args        json.RawMessage `json:"args,omitempty"`
 	Output      string          `json:"output,omitempty"`

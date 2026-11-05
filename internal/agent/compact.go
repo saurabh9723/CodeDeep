@@ -79,7 +79,7 @@ func (a *Agent) compact(ctx context.Context, msgs *[]llm.Message, sess *session.
 	*msgs = append([]llm.Message{summaryMsg}, kept...)
 
 	after := llm.EstimatedTokens(*msgs)
-	a.emit.Emit(Event{
+	a.emitEvent(Event{
 		Type:      EventCompact,
 		SessionID: sessionID(sess),
 		Depth:     a.depth,

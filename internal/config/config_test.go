@@ -13,6 +13,8 @@ import (
 var configEnvVars = []string{
 	"DEEPSEEK_API_KEY", "CODEAGENT_API_KEY", "OPENAI_API_KEY",
 	"DEEPSEEK_BASE_URL", "CODEAGENT_BASE_URL", "OPENAI_BASE_URL",
+	"CODEAGENT_PROVIDER", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+	"GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_BASE_URL",
 	"CODEAGENT_MODEL", "DEEPSEEK_MODEL",
 	"CODEAGENT_MAX_TOKENS", "CODEAGENT_TEMPERATURE", "CODEAGENT_CONTEXT_WINDOW",
 	"CODEAGENT_COMPACT_AT", "CODEAGENT_APPROVAL", "CODEAGENT_SESSIONS_DIR",
@@ -337,5 +339,73 @@ func TestPricingFile(t *testing.T) {
 	p, ok := cfg.Pricing["priced"]
 	if !ok || p.InputPerMTok != 0.27 || p.OutputPerMTok != 1.1 || p.CacheHitPerMTok != 0.07 {
 		t.Fatalf("pricing = %+v", cfg.Pricing)
+	}
+}
+
+func TestProviderPresets(t *testing.T) {
+	cases := []struct {
+		provider string
+		base     string
+		model    string
+		window   int
+	}{
+		{"anthropic", "https://api.anthropic.com", "claude-sonnet-4-5", 200000},
+		{"gemini", "https://generativelanguage.googleapis.com", "gemini-2.5-pro", 1000000},
+		{"ollama", "http://localhost:11434/v1", "qwen2.5-coder:7b", 32768},
+	}
+	for _, tc := range cases {
+		c := Default()
+		c.Provider = tc.provider
+		c.normalize()
+		if c.Provider != tc.provider || c.BaseURL != tc.base || c.Model != tc.model || c.ContextWindow != tc.window {
+			t.Errorf("%s preset = provider %q base %q model %q window %d",
+				tc.provider, c.Provider, c.BaseURL, c.Model, c.ContextWindow)
+		}
+	}
+
+	c := Default()
+	c.Provider = "anthropic"
+	c.BaseURL = "https://proxy.example/v1"
+	c.Model = "custom-model"
+	c.ContextWindow = 4096
+	c.normalize()
+	if c.BaseURL != "https://proxy.example/v1" || c.Model != "custom-model" || c.ContextWindow != 4096 {
+		t.Errorf("explicit values should win over presets: %#v", c)
+	}
+
+	c = Default()
+	c.Provider = "ollama"
+	c.APIKey = ""
+	c.normalize()
+	if !c.APIKeyPresent() {
+		t.Error("ollama should not require an API key")
+	}
+}
+
+func TestProviderEnvSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clearConfigEnv(t)
+	t.Setenv("CODEAGENT_PROVIDER", "anthropic")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-env")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Provider != "anthropic" || c.APIKey != "sk-ant-env" || c.BaseURL != "https://api.anthropic.com" {
+		t.Errorf("anthropic env config = %#v", c)
+	}
+
+	clearConfigEnv(t)
+	t.Setenv("CODEAGENT_PROVIDER", "gemini")
+	t.Setenv("GEMINI_API_KEY", "gem-env")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Provider != "gemini" || c.APIKey != "gem-env" || c.Model != "gemini-2.5-pro" {
+		t.Errorf("gemini env config = %#v", c)
 	}
 }

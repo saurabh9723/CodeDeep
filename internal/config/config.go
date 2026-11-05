@@ -28,7 +28,18 @@ type MCPServer struct {
 	TimeoutSec int               `json:"timeout_sec,omitempty"`
 }
 
+// PermissionRule grants or denies a tool call without prompting. Command and
+// Path are optional globs; when both are set the rule requires both to match.
+// A deny rule always wins over an allow rule and over auto-approval.
+type PermissionRule struct {
+	Tool    string `json:"tool"`
+	Action  string `json:"action"`
+	Command string `json:"command,omitempty"`
+	Path    string `json:"path,omitempty"`
+}
+
 type Config struct {
+	Provider         string               `json:"provider"`
 	APIKey           string               `json:"api_key"`
 	BaseURL          string               `json:"base_url"`
 	Model            string               `json:"model"`
@@ -47,6 +58,7 @@ type Config struct {
 	MCPServers       map[string]MCPServer `json:"mcp_servers"`
 	InstructionFiles []string             `json:"instruction_files"`
 	Pricing          map[string]Price     `json:"pricing,omitempty"`
+	Permissions      []PermissionRule     `json:"permissions,omitempty"`
 	ConfigPath       string               `json:"-"`
 	Home             string               `json:"-"`
 
@@ -75,6 +87,7 @@ func Default() *Config {
 	}
 	wd, _ := os.Getwd()
 	return &Config{
+		Provider:      "openai",
 		BaseURL:       "https://api.deepseek.com",
 		Model:         "deepseek-chat",
 		MaxTokens:     8192,
@@ -178,11 +191,31 @@ func envFirst(names ...string) string {
 }
 
 func (c *Config) applyEnv() {
-	if v := envFirst("DEEPSEEK_API_KEY", "CODEAGENT_API_KEY", "OPENAI_API_KEY"); v != "" {
-		c.APIKey = v
+	if v := envFirst("CODEAGENT_PROVIDER"); v != "" {
+		c.Provider = v
 	}
-	if v := envFirst("DEEPSEEK_BASE_URL", "CODEAGENT_BASE_URL", "OPENAI_BASE_URL"); v != "" {
-		c.BaseURL = v
+	switch strings.ToLower(strings.TrimSpace(c.Provider)) {
+	case "anthropic", "claude":
+		if v := envFirst("ANTHROPIC_API_KEY", "CODEAGENT_API_KEY"); v != "" {
+			c.APIKey = v
+		}
+		if v := envFirst("ANTHROPIC_BASE_URL", "CODEAGENT_BASE_URL"); v != "" {
+			c.BaseURL = v
+		}
+	case "gemini", "google":
+		if v := envFirst("GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEAGENT_API_KEY"); v != "" {
+			c.APIKey = v
+		}
+		if v := envFirst("GEMINI_BASE_URL", "CODEAGENT_BASE_URL"); v != "" {
+			c.BaseURL = v
+		}
+	default:
+		if v := envFirst("DEEPSEEK_API_KEY", "CODEAGENT_API_KEY", "OPENAI_API_KEY"); v != "" {
+			c.APIKey = v
+		}
+		if v := envFirst("DEEPSEEK_BASE_URL", "CODEAGENT_BASE_URL", "OPENAI_BASE_URL"); v != "" {
+			c.BaseURL = v
+		}
 	}
 	if v := envFirst("CODEAGENT_MODEL", "DEEPSEEK_MODEL"); v != "" {
 		c.Model = v
@@ -247,6 +280,17 @@ func (c *Config) normalize() {
 	default:
 		c.Approval = "ask"
 	}
+	switch strings.ToLower(strings.TrimSpace(c.Provider)) {
+	case "anthropic", "claude":
+		c.Provider = "anthropic"
+	case "gemini", "google":
+		c.Provider = "gemini"
+	case "ollama":
+		c.Provider = "ollama"
+	default:
+		c.Provider = "openai"
+	}
+	c.applyProviderPreset()
 	if c.BaseURL == "" {
 		c.BaseURL = "https://api.deepseek.com"
 	}
@@ -281,10 +325,83 @@ func (c *Config) normalize() {
 	if c.CompactAt <= 0 || c.CompactAt >= 1 {
 		c.CompactAt = 0.8
 	}
+	for i := range c.Permissions {
+		c.Permissions[i].Tool = strings.TrimSpace(c.Permissions[i].Tool)
+		c.Permissions[i].Action = strings.ToLower(strings.TrimSpace(c.Permissions[i].Action))
+		c.Permissions[i].Command = strings.TrimSpace(c.Permissions[i].Command)
+		c.Permissions[i].Path = strings.TrimSpace(c.Permissions[i].Path)
+	}
+}
+
+// SetProvider validates and selects a provider at runtime, applying the
+// provider's preset base URL/model when the current values are still the
+// defaults.
+func (c *Config) SetProvider(provider string) error {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	switch p {
+	case "openai", "ollama", "anthropic", "gemini":
+	case "claude":
+		p = "anthropic"
+	case "google":
+		p = "gemini"
+	default:
+		return fmt.Errorf("unsupported provider %q (use openai, anthropic, gemini, or ollama)", provider)
+	}
+	c.Provider = p
+	c.applyProviderPreset()
+	return nil
+}
+
+// applyProviderPreset fills base URL, model, and context window defaults for
+// the selected provider. Values explicitly set by the user are preserved: the
+// preset only replaces the DeepSeek defaults or empty fields.
+func (c *Config) applyProviderPreset() {
+	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	untouchedBase := base == "" || base == "https://api.deepseek.com"
+	model := strings.TrimSpace(c.Model)
+	untouchedModel := model == "" || model == "deepseek-chat"
+	switch c.Provider {
+	case "anthropic":
+		if untouchedBase {
+			c.BaseURL = "https://api.anthropic.com"
+		}
+		if untouchedModel {
+			c.Model = "claude-sonnet-4-5"
+		}
+		if c.ContextWindow == 128000 {
+			c.ContextWindow = 200000
+		}
+	case "gemini":
+		if untouchedBase {
+			c.BaseURL = "https://generativelanguage.googleapis.com"
+		}
+		if untouchedModel {
+			c.Model = "gemini-2.5-pro"
+		}
+		if c.ContextWindow == 128000 {
+			c.ContextWindow = 1000000
+		}
+	case "ollama":
+		if untouchedBase {
+			c.BaseURL = "http://localhost:11434/v1"
+		}
+		if untouchedModel {
+			c.Model = "qwen2.5-coder:7b"
+		}
+		if c.ContextWindow == 128000 {
+			c.ContextWindow = 32768
+		}
+	}
 }
 
 // APIKeyPresent reports whether a key is configured, regardless of validity.
-func (c *Config) APIKeyPresent() bool { return strings.TrimSpace(c.APIKey) != "" }
+// Local Ollama servers do not require one.
+func (c *Config) APIKeyPresent() bool {
+	if c.Provider == "ollama" {
+		return true
+	}
+	return strings.TrimSpace(c.APIKey) != ""
+}
 
 // UsageCost estimates the USD cost of a usage record for the current model.
 // The boolean is false when no pricing is configured for the model.

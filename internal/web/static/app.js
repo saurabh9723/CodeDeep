@@ -25,6 +25,9 @@ const state = {
   cost: 0,
   plan: false,
   checkpoints: 0,
+  files: { open: false, mention: false, path: '', seq: 0 },
+  palette: { open: false, items: [], index: 0 },
+  images: [],
 };
 
 const chat = $('#chat');
@@ -50,6 +53,7 @@ async function init() {
     state.keyPresent = !!boot.api_key_present;
     state.plan = !!boot.plan;
     $('#modelChip').textContent = boot.model;
+    $('#modelChip').title = `${boot.provider || 'openai'} · ${boot.model} · ${boot.base_url || ''}`;
     $('#approvalChip').textContent = boot.approval + ' mode';
     updatePlanChip(boot.approval);
     setCheckpoints(0);
@@ -77,6 +81,44 @@ function bindUI() {
   $('#themeBtn').addEventListener('click', toggleTheme);
   $('#planChip').addEventListener('click', togglePlan);
   $('#undoBtn').addEventListener('click', undoLastTurn);
+  $('#exportBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleExportMenu();
+  });
+  $('#exportMenu').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-format]');
+    if (btn) exportSession(btn.dataset.format);
+  });
+  $('#filesBtn').addEventListener('click', () => {
+    if (state.files.open) closeFilePalette();
+    else openFilePalette(false);
+  });
+  $('#filesCloseBtn').addEventListener('click', closeFilePalette);
+  $('#filesUpBtn').addEventListener('click', filePaletteUp);
+  $('#filesFilter').addEventListener('input', onFileFilter);
+  $('#filesFilter').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeFilePalette();
+      input.focus();
+    }
+  });
+  document.addEventListener('click', () => {
+    const menu = $('#exportMenu');
+    if (menu) menu.hidden = true;
+  });
+  let searchTimer = null;
+  $('#sessionSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimer);
+    const q = e.target.value;
+    searchTimer = setTimeout(() => refreshSessions(q), 220);
+  });
+  $('#sessionSearch').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.target.value = '';
+      refreshSessions('');
+    }
+  });
   $('#helpBtn').addEventListener('click', () =>
     toast('Enter to send · Shift+Enter for a newline · Ctrl/⌘+N for a new chat · Ctrl/⌘+K to focus · Esc to stop', 6000)
   );
@@ -87,8 +129,54 @@ function bindUI() {
   $('#menuBtn').addEventListener('click', () => $('#app').classList.add('sidebar-open'));
   $('#sidebarBackdrop').addEventListener('click', closeSidebar);
 
-  input.addEventListener('input', resizeInput);
+  input.addEventListener('input', onInputChanged);
+  const composer = $('#composer');
+  composer.addEventListener('paste', (e) => {
+    const files = Array.from((e.clipboardData && e.clipboardData.items) || [])
+      .filter((it) => it.kind === 'file' && (it.type || '').startsWith('image/'))
+      .map((it) => it.getAsFile())
+      .filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    files.forEach(addImageFile);
+  });
+  composer.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+    e.preventDefault();
+    composer.classList.add('dragging');
+  });
+  composer.addEventListener('dragleave', () => composer.classList.remove('dragging'));
+  composer.addEventListener('drop', (e) => {
+    composer.classList.remove('dragging');
+    if (!e.dataTransfer) return;
+    const files = Array.from(e.dataTransfer.files || []).filter((f) => (f.type || '').startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    files.forEach(addImageFile);
+  });
   input.addEventListener('keydown', (e) => {
+    if (state.palette.open) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        movePalette(1);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        movePalette(-1);
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        runPaletteSelection();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeCommandPalette();
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
@@ -104,7 +192,13 @@ function bindUI() {
       e.preventDefault();
       input.focus();
     } else if (e.key === 'Escape') {
-      if (state.running) {
+      if (state.palette.open) {
+        e.preventDefault();
+        closeCommandPalette();
+      } else if (state.files.open) {
+        e.preventDefault();
+        closeFilePalette();
+      } else if (state.running) {
         e.preventDefault();
         stopRun();
       } else if (document.activeElement === input) {
@@ -126,12 +220,20 @@ function bindUI() {
  * sessions
  * ------------------------------------------------------------------ */
 
-function renderSessions(metas) {
+function renderSessions(metas, query) {
   state.lastSessions = metas || [];
   const list = $('#sessionList');
   list.innerHTML = '';
   if (!state.lastSessions.length) {
-    list.append(el('div', 'session-empty', 'No sessions yet. Your conversations are saved here.'));
+    list.append(
+      el(
+        'div',
+        'session-empty',
+        query
+          ? `No sessions match “${truncate(query, 40)}”.`
+          : 'No sessions yet. Your conversations are saved here.'
+      )
+    );
     return;
   }
   for (const meta of state.lastSessions) {
@@ -147,6 +249,7 @@ function renderSessions(metas) {
       el('span', 'session-time', relTime(meta.updated))
     );
     open.append(title, line);
+    if (meta.snippet) open.append(el('div', 'session-snippet', meta.snippet));
     open.addEventListener('click', () => loadSession(meta.id));
 
     const del = el('button', 'session-del', '×');
@@ -163,10 +266,11 @@ function renderSessions(metas) {
   }
 }
 
-async function refreshSessions() {
+async function refreshSessions(query) {
   try {
-    const metas = await api('/api/sessions');
-    renderSessions(metas);
+    const q = query !== undefined ? String(query || '').trim() : ($('#sessionSearch').value || '').trim();
+    const metas = await api('/api/sessions' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    renderSessions(metas, q);
     const mine = metas.find((m) => m.id === state.sessionId);
     if (mine && mine.title) setTitle(mine.title);
   } catch {
@@ -181,7 +285,9 @@ async function loadSession(id) {
     state.sessionId = sess.id;
     clearChat();
     renderHistory(sess);
+    clearImages();
     setTitle(sess.title || 'Session');
+    updateExportButton();
     if (sess.model) $('#modelChip').textContent = sess.model;
     setUsage(sess.usage || null);
     setCheckpoints((sess.checkpoints || []).length);
@@ -203,6 +309,7 @@ async function deleteSession(id) {
       showEmpty();
       setTitle('New session');
       setUsage(null);
+      updateExportButton();
     }
     await refreshSessions();
   } catch (err) {
@@ -214,13 +321,119 @@ function newChat() {
   if (state.running) stopRun();
   state.sessionId = null;
   clearChat();
+  clearImages();
   showEmpty();
   setTitle('New session');
   setUsage(null);
   setCheckpoints(0);
+  updateExportButton();
   renderSessions(state.lastSessions);
   closeSidebar();
   input.focus();
+}
+
+function updateExportButton() {
+  const btn = $('#exportBtn');
+  if (btn) btn.hidden = !state.sessionId;
+}
+
+function toggleExportMenu() {
+  const menu = $('#exportMenu');
+  if (!menu) return;
+  if (!state.sessionId) {
+    toast('Open or start a session to export it.');
+    return;
+  }
+  menu.hidden = !menu.hidden;
+}
+
+function exportSession(format) {
+  const menu = $('#exportMenu');
+  if (menu) menu.hidden = true;
+  if (!state.sessionId) {
+    toast('Open or start a session to export it.');
+    return;
+  }
+  const url =
+    '/api/sessions/' +
+    encodeURIComponent(state.sessionId) +
+    '/export?format=' +
+    (format === 'json' ? 'json' : 'md');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast('Exporting as ' + (format === 'json' ? 'JSON' : 'Markdown') + '…');
+}
+
+/* ------------------------------------------------------------------ *
+ * image attachments
+ * ------------------------------------------------------------------ */
+
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+function addImageFile(file) {
+  if (!file || !file.type) return;
+  if (!IMAGE_TYPES.includes(file.type)) {
+    toast('Use PNG, JPEG, WebP, or GIF images.');
+    return;
+  }
+  if (state.images.length >= MAX_IMAGES) {
+    toast(`Up to ${MAX_IMAGES} images per message.`);
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    toast('That image is larger than 5 MB.');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = String(reader.result || '');
+    const comma = result.indexOf(',');
+    if (comma < 0) return;
+    state.images.push({ mime: file.type, data: result.slice(comma + 1), name: file.name || 'pasted image' });
+    renderAttachments();
+  };
+  reader.onerror = () => toast('Could not read that image.');
+  reader.readAsDataURL(file);
+}
+
+function renderAttachments() {
+  const tray = $('#attachments');
+  if (!tray) return;
+  tray.innerHTML = '';
+  tray.hidden = state.images.length === 0;
+  state.images.forEach((img, i) => {
+    const item = el('div', 'attachment');
+    item.title = img.name || 'attached image';
+    const thumb = document.createElement('img');
+    thumb.src = `data:${img.mime};base64,${img.data}`;
+    thumb.alt = img.name || 'attached image';
+    const remove = el('button', 'attachment-remove', '×');
+    remove.type = 'button';
+    remove.title = 'Remove image';
+    remove.setAttribute('aria-label', 'Remove image');
+    remove.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.images.splice(i, 1);
+      renderAttachments();
+    });
+    item.append(thumb, remove);
+    tray.append(item);
+  });
+}
+
+function clearImages() {
+  state.images = [];
+  renderAttachments();
+}
+
+function imagePayload() {
+  return state.images.map(({ mime, data }) => ({ mime, data }));
 }
 
 /* ------------------------------------------------------------------ *
@@ -228,17 +441,25 @@ function newChat() {
  * ------------------------------------------------------------------ */
 
 async function send() {
+  const text = input.value.trim();
+  const images = imagePayload();
+  if ((!text && !images.length) || state.running) return;
+  if (text.startsWith('/')) {
+    input.value = '';
+    resizeInput();
+    closeCommandPalette();
+    await runSlashCommand(text);
+    return;
+  }
   if (!state.keyPresent) {
     toast('Set DEEPSEEK_API_KEY and restart the server to start chatting.', 5000);
     return;
   }
-  const text = input.value.trim();
-  if (!text || state.running) return;
 
   hideEmpty();
   const turn = newTurn();
   state.turn = turn;
-  addUserMessage(text, turn);
+  addUserMessage(text, turn, images);
   state.assistant = createAssistant();
   state.assistantFresh = true;
   state.toolCards.clear();
@@ -254,7 +475,7 @@ async function send() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: state.sessionId || '', prompt: text }),
+      body: JSON.stringify({ session_id: state.sessionId || '', prompt: text, images }),
       signal: state.abort.signal,
     });
     if (!res.ok) {
@@ -268,6 +489,7 @@ async function send() {
       throw new Error(message);
     }
     if (!res.body) throw new Error('This browser does not support streaming responses.');
+    clearImages();
     await readStream(res.body);
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -288,6 +510,265 @@ async function send() {
 
 function stopRun() {
   if (state.abort) state.abort.abort();
+}
+
+/* ------------------------------------------------------------------ *
+ * file picker, @-mentions, and slash commands
+ * ------------------------------------------------------------------ */
+
+function onInputChanged() {
+  resizeInput();
+  const value = input.value;
+  const caret = input.selectionStart || 0;
+  const before = value.slice(0, caret);
+  if (/(^|\s)@$/.test(before)) {
+    openFilePalette(true);
+    return;
+  }
+  if (/^\/[^\n]*$/.test(value)) {
+    updateCommandPalette(value);
+  } else {
+    closeCommandPalette();
+  }
+}
+
+function openFilePalette(mention) {
+  state.files.open = true;
+  state.files.mention = !!mention;
+  state.files.path = '';
+  $('#filePalette').hidden = false;
+  $('#filesHint').textContent = mention ? 'Click a file to insert @path' : 'Click a file to insert its path';
+  $('#filesFilter').value = '';
+  closeCommandPalette();
+  loadFiles('');
+  $('#filesFilter').focus();
+}
+
+function closeFilePalette() {
+  state.files.open = false;
+  $('#filePalette').hidden = true;
+}
+
+function filePaletteUp() {
+  if (!state.files.path) return;
+  const parent = state.files.path.split('/').slice(0, -1).join('/');
+  loadFiles(parent);
+}
+
+async function loadFiles(path) {
+  const seq = ++state.files.seq;
+  state.files.path = path || '';
+  $('#filesPath').textContent = '/' + state.files.path;
+  $('#filesUpBtn').disabled = !state.files.path;
+  try {
+    const entries = await api('/api/files?path=' + encodeURIComponent(state.files.path));
+    if (seq !== state.files.seq) return;
+    renderFileEntries(entries || [], false);
+  } catch (err) {
+    if (seq === state.files.seq) renderFileMessage('Could not list files: ' + err.message);
+  }
+}
+
+let fileSearchTimer = null;
+function onFileFilter() {
+  clearTimeout(fileSearchTimer);
+  const q = $('#filesFilter').value.trim();
+  fileSearchTimer = setTimeout(() => {
+    if (!state.files.open) return;
+    if (q) searchFiles(q);
+    else loadFiles('');
+  }, 180);
+}
+
+async function searchFiles(query) {
+  const seq = ++state.files.seq;
+  try {
+    const entries = await api('/api/files/search?q=' + encodeURIComponent(query));
+    if (seq !== state.files.seq) return;
+    $('#filesPath').textContent = '“' + truncate(query, 40) + '”';
+    $('#filesUpBtn').disabled = true;
+    renderFileEntries(entries || [], true);
+  } catch (err) {
+    if (seq === state.files.seq) renderFileMessage('Search failed: ' + err.message);
+  }
+}
+
+function renderFileMessage(text) {
+  const list = $('#filesList');
+  list.innerHTML = '';
+  list.append(el('div', 'palette-empty', text));
+}
+
+function renderFileEntries(entries, searching) {
+  const list = $('#filesList');
+  list.innerHTML = '';
+  if (!entries.length) {
+    list.append(el('div', 'palette-empty', searching ? 'No matching files.' : 'Empty directory.'));
+    return;
+  }
+  for (const entry of entries) {
+    const row = el('button', 'palette-row');
+    row.type = 'button';
+    row.title = entry.path;
+    row.append(
+      el('span', 'palette-icon', entry.dir && !searching ? '▸' : '·'),
+      el('span', 'palette-name', entry.name)
+    );
+    if (entry.dir && !searching) row.append(el('span', 'palette-desc', 'dir'));
+    row.addEventListener('click', () => {
+      if (entry.dir && !searching) loadFiles(entry.path);
+      else insertFileMention(entry.path);
+    });
+    list.append(row);
+  }
+}
+
+function insertFileMention(path) {
+  const mention = state.files.mention;
+  closeFilePalette();
+  const value = input.value;
+  const caret = input.selectionStart || value.length;
+  const before = value.slice(0, caret);
+  const trailing = value.slice(caret);
+  if (mention) {
+    const m = /(^|\s)@([^\s@]*)$/.exec(before);
+    if (m) {
+      const start = before.length - m[2].length - 1;
+      input.value = value.slice(0, start) + '@' + path + ' ' + trailing;
+    } else {
+      input.value = before + '@' + path + ' ' + trailing;
+    }
+  } else {
+    const sep = before && !/\s$/.test(before) ? ' ' : '';
+    input.value = before + sep + path + ' ' + trailing;
+  }
+  input.focus();
+  input.selectionStart = input.selectionEnd = input.value.length;
+  resizeInput();
+}
+
+const slashCommands = [
+  { name: '/compact', desc: 'Summarize older messages', run: () => compactNow() },
+  { name: '/new', desc: 'Start a new session', run: () => newChat() },
+  { name: '/plan', desc: 'Toggle plan mode', run: () => togglePlan() },
+  { name: '/undo', desc: 'Revert the last turn', run: () => undoLastTurn() },
+  { name: '/export md', desc: 'Export as Markdown', run: () => exportSession('md') },
+  { name: '/export json', desc: 'Export as JSON', run: () => exportSession('json') },
+  { name: '/sessions', desc: 'Search sessions', run: () => $('#sessionSearch').focus() },
+  {
+    name: '/help',
+    desc: 'Keyboard shortcuts',
+    run: () => toast('Enter to send · Shift+Enter newline · @ files · / commands · Ctrl/⌘+K focus', 6000),
+  },
+];
+
+function updateCommandPalette(value) {
+  const q = value.trim().toLowerCase();
+  const items = slashCommands.filter(
+    (cmd) => cmd.name.startsWith(q) || (q.length > 1 && cmd.desc.toLowerCase().includes(q.slice(1)))
+  );
+  if (!items.length) {
+    closeCommandPalette();
+    return;
+  }
+  state.palette.open = true;
+  state.palette.items = items;
+  if (state.palette.index >= items.length) state.palette.index = 0;
+  const list = $('#commandList');
+  list.innerHTML = '';
+  items.forEach((cmd, i) => {
+    const row = el('button', 'palette-row' + (i === state.palette.index ? ' selected' : ''));
+    row.type = 'button';
+    row.append(el('span', 'palette-name', cmd.name), el('span', 'palette-desc', cmd.desc));
+    row.addEventListener('click', () => {
+      closeCommandPalette();
+      input.value = '';
+      resizeInput();
+      cmd.run();
+    });
+    list.append(row);
+  });
+  $('#commandPalette').hidden = false;
+}
+
+function closeCommandPalette() {
+  state.palette.open = false;
+  state.palette.items = [];
+  state.palette.index = 0;
+  $('#commandPalette').hidden = true;
+}
+
+function movePalette(delta) {
+  if (!state.palette.items.length) return;
+  const n = state.palette.items.length;
+  state.palette.index = (state.palette.index + delta + n) % n;
+  updateCommandPalette(input.value);
+}
+
+function runPaletteSelection() {
+  const cmd = state.palette.items[state.palette.index];
+  if (!cmd) return;
+  closeCommandPalette();
+  input.value = '';
+  resizeInput();
+  cmd.run();
+}
+
+async function runSlashCommand(text) {
+  const parts = text.trim().split(/\s+/);
+  switch (parts[0].toLowerCase()) {
+    case '/compact':
+      return compactNow();
+    case '/new':
+      newChat();
+      return;
+    case '/plan':
+      return togglePlan();
+    case '/undo':
+      return undoLastTurn();
+    case '/export':
+      exportSession(parts[1] === 'json' ? 'json' : 'md');
+      return;
+    case '/sessions':
+      $('#sessionSearch').focus();
+      return;
+    case '/help':
+      toast('Slash commands: /compact, /new, /plan, /undo, /export md|json, /sessions, /help', 6000);
+      return;
+    default:
+      toast('Unknown command ' + parts[0] + '. Type / to browse commands.');
+  }
+}
+
+async function compactNow() {
+  if (state.running) {
+    toast('Wait for the current run to finish.');
+    return;
+  }
+  if (!state.sessionId) {
+    toast('Open or start a session first.');
+    return;
+  }
+  if (!state.keyPresent) {
+    toast('Set DEEPSEEK_API_KEY to compact a session.');
+    return;
+  }
+  setStatus('busy', 'compacting');
+  try {
+    const res = await api('/api/compact', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: state.sessionId }),
+    });
+    if (res.usage) setUsage(res.usage);
+    toast('Compacted ' + res.removed + ' messages.');
+    await refreshSessionState();
+    await refreshSessions();
+  } catch (err) {
+    toast('Compact failed: ' + err.message, 5000);
+  } finally {
+    setStatus('ready', 'ready');
+    input.focus();
+  }
 }
 
 async function readStream(body) {
@@ -324,6 +805,7 @@ function handleEvent(ev) {
     case 'session':
       if (ev.session_id) {
         state.sessionId = ev.session_id;
+        updateExportButton();
         if (ev.message) setTitle(ev.message);
       }
       break;
@@ -631,7 +1113,7 @@ function onApprovalRequest(ev) {
   allow.type = 'button';
   allow.addEventListener('click', () => respondApproval(ev.approval_id, 'allow'));
 
-  const always = el('button', 'btn', 'Always allow ' + (ev.name || 'tool'));
+  const always = el('button', 'btn', approvalAlwaysLabel(ev));
   always.type = 'button';
   always.addEventListener('click', () => respondApproval(ev.approval_id, 'always'));
 
@@ -647,6 +1129,13 @@ function onApprovalRequest(ev) {
   state.approvals.set(ev.approval_id || '', { card, actions, result, name: ev.name, answered: false });
   setStatus('busy', 'waiting for approval');
   scrollSoon();
+}
+
+function approvalAlwaysLabel(ev) {
+  const args = parseMaybe(ev.args) || {};
+  if (ev.name === 'bash' && args.command) return 'Always allow this command';
+  if ((ev.name === 'write_file' || ev.name === 'edit_file') && args.path) return 'Always allow this file';
+  return 'Always allow ' + (ev.name || 'tool');
 }
 
 async function respondApproval(id, decision) {
@@ -781,7 +1270,7 @@ function renderHistory(sess) {
       if ((m.content || '').startsWith('[Conversation summary')) {
         addSummaryCard(m.content || '', turn);
       } else {
-        addUserMessage(m.content || '', turn);
+        addUserMessage(m.content || '', turn, m.images || []);
       }
       continue;
     }
@@ -825,9 +1314,23 @@ function renderHistory(sess) {
   scrollToBottom(true);
 }
 
-function addUserMessage(text, turn) {
+function addUserMessage(text, turn, images) {
   const msg = el('div', 'msg user');
-  msg.append(el('div', 'bubble', text));
+  const bubble = el('div', 'bubble');
+  if (text) bubble.append(el('div', 'bubble-text', text));
+  const list = images || [];
+  if (list.length) {
+    const grid = el('div', 'bubble-images');
+    for (const img of list) {
+      const thumb = document.createElement('img');
+      thumb.src = `data:${img.mime || 'image/png'};base64,${img.data}`;
+      thumb.alt = 'attached image';
+      thumb.loading = 'lazy';
+      grid.append(thumb);
+    }
+    bubble.append(grid);
+  }
+  msg.append(bubble);
   (turn || state.turn || newTurn()).append(msg);
   scrollSoon();
 }

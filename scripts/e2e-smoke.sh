@@ -111,6 +111,41 @@ fi
 curl -fsS "http://127.0.0.1:$WEBPORT/api/bootstrap" >"$TMP/boot.json"
 grep -q '"approval":"auto"' "$TMP/boot.json"
 grep -q '"plan":false' "$TMP/boot.json"
+grep -q '"provider":"openai"' "$TMP/boot.json"
+
+# Session search, export, and workspace file browsing.
+curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions?q=mock-output" >"$TMP/search.json"
+grep -q "\"id\":\"$SID\"" "$TMP/search.json"
+curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions/$SID/export?format=md" >"$TMP/export.md"
+grep -q '^## User' "$TMP/export.md"
+grep -q 'mock-output.txt' "$TMP/export.md"
+curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions/$SID/export?format=json" >"$TMP/export.json"
+grep -q '"messages"' "$TMP/export.json"
+curl -fsS "http://127.0.0.1:$WEBPORT/api/files" >"$TMP/files.json"
+grep -q 'mock-output.txt' "$TMP/files.json"
+curl -fsS "http://127.0.0.1:$WEBPORT/api/files/search?q=mock-output" >"$TMP/files-search.json"
+grep -q '"path":"mock-output.txt"' "$TMP/files-search.json"
+
+# Image attachments are validated and stored in the session.
+BAD_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d '{"prompt":"x","images":[{"mime":"image/svg+xml","data":"aGk="}]}' \
+  "http://127.0.0.1:$WEBPORT/api/chat")
+if [ "$BAD_STATUS" != "400" ]; then
+  echo "unsupported image type should be rejected with 400, got $BAD_STATUS" >&2
+  exit 1
+fi
+PNG="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d "{\"prompt\":\"describe this image\",\"images\":[{\"mime\":\"image/png\",\"data\":\"$PNG\"}]}" \
+  "http://127.0.0.1:$WEBPORT/api/chat" >"$TMP/image-chat.ndjson"
+grep -q '"type":"user"' "$TMP/image-chat.ndjson"
+grep -q '"images":\[' "$TMP/image-chat.ndjson"
+IMG_SID=$(grep -o '"session_id":"[^"]*"' "$TMP/image-chat.ndjson" | head -n 1 | sed 's/.*:"//; s/"$//')
+if [ -z "$IMG_SID" ] || [ ! -f "$TMP/sessions/$IMG_SID.json" ]; then
+  echo "image chat session was not persisted" >&2
+  exit 1
+fi
+grep -q '"mime": "image/png"' "$TMP/sessions/$IMG_SID.json"
 
 curl -fsS -X POST -H 'Content-Type: application/json' \
   -d '{"enabled":true}' "http://127.0.0.1:$WEBPORT/api/plan" >"$TMP/plan-on.json"

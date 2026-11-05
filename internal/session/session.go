@@ -56,6 +56,9 @@ type Meta struct {
 	Updated      time.Time `json:"updated"`
 	MessageCount int       `json:"message_count"`
 	TotalTokens  int       `json:"total_tokens"`
+	// Snippet is the matching excerpt populated by Search. It is empty for
+	// plain listings.
+	Snippet string `json:"snippet,omitempty"`
 }
 
 type Store struct {

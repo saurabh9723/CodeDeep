@@ -25,11 +25,7 @@ type Client struct {
 	noStreamUsage atomic.Bool
 }
 
-func NewClient(baseURL, apiKey string) *Client {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		baseURL = "https://api.deepseek.com"
-	}
+func newHTTPClient() *http.Client {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -41,10 +37,18 @@ func NewClient(baseURL, apiKey string) *Client {
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          16,
 	}
+	return &http.Client{Transport: transport}
+}
+
+func NewClient(baseURL, apiKey string) *Client {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com"
+	}
 	return &Client{
 		BaseURL: baseURL,
 		APIKey:  apiKey,
-		HTTP:    &http.Client{Transport: transport},
+		HTTP:    newHTTPClient(),
 	}
 }
 
@@ -64,15 +68,49 @@ type streamOptions struct {
 
 type apiMessage struct {
 	Role       string     `json:"role"`
-	Content    *string    `json:"content,omitempty"`
+	Content    any        `json:"content,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type apiContentPart struct {
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	ImageURL *apiImageURL `json:"image_url,omitempty"`
+}
+
+type apiImageURL struct {
+	URL string `json:"url"`
 }
 
 func toAPIMessages(msgs []Message) []apiMessage {
 	out := make([]apiMessage, 0, len(msgs))
 	for _, m := range msgs {
 		am := apiMessage{Role: m.Role, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
+		if m.Role == "user" && len(m.Images) > 0 {
+			parts := make([]apiContentPart, 0, len(m.Images)+1)
+			if m.Content != "" {
+				parts = append(parts, apiContentPart{Type: "text", Text: m.Content})
+			}
+			for _, img := range m.Images {
+				if strings.TrimSpace(img.Data) == "" {
+					continue
+				}
+				mime := strings.TrimSpace(img.MIME)
+				if mime == "" {
+					mime = "image/png"
+				}
+				parts = append(parts, apiContentPart{
+					Type:     "image_url",
+					ImageURL: &apiImageURL{URL: "data:" + mime + ";base64," + img.Data},
+				})
+			}
+			if len(parts) > 0 {
+				am.Content = parts
+				out = append(out, am)
+				continue
+			}
+		}
 		// An assistant message that only carries tool calls may omit content.
 		// Tool results must always carry a (possibly empty) content field.
 		if m.Content != "" || m.Role != "assistant" || len(m.ToolCalls) == 0 {

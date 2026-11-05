@@ -18,7 +18,7 @@ import (
 // App holds the long-lived pieces shared by the CLI and the web server.
 type App struct {
 	Cfg      *config.Config
-	Client   *llm.Client
+	Client   llm.Provider
 	Registry *tools.Registry
 	FS       *tools.FS
 	Sessions *session.Store
@@ -40,7 +40,7 @@ func New(cfg *config.Config) (*App, error) {
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	registry := tools.NewRegistry()
 	tools.RegisterCore(registry, fsys, cfg.Shell)
-	client := llm.NewClient(cfg.BaseURL, cfg.APIKey)
+	client := llm.NewProvider(cfg.Provider, cfg.BaseURL, cfg.APIKey)
 
 	a := &App{
 		Cfg:      cfg,

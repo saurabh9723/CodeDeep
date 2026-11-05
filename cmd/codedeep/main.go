@@ -68,11 +68,14 @@ Usage:
   codedeep serve               start the local web UI
   codedeep doctor              show configuration and environment
   codedeep sessions            list saved sessions
+  codedeep sessions -q parser  search titles and transcripts
+  codedeep sessions -export ID export a session as markdown or JSON
   codedeep version             print version information
 
 Common flags:
   -config PATH       config file (default ~/.codedeep/config.json)
   -cwd DIR           workspace directory (default: current directory)
+  -provider NAME     openai (default), anthropic, gemini, or ollama
   -m, -model NAME    model name
   -approval MODE     ask, auto, readonly, or plan
   -y, -yes           shorthand for -approval auto
@@ -82,13 +85,16 @@ Common flags:
 Chat flags:
   -p, -prompt TEXT   prompt for a one-shot run ("-" reads stdin)
   -c, -continue      continue the most recent session in this workspace
-  -r, -resume ID     resume a specific session
+  -r, -resume ID     resume a session by id or title
   -json              emit NDJSON events instead of the terminal transcript
   -reasoning         show the model's reasoning stream
   -plain             disable colors
 
 Environment:
+  CODEAGENT_PROVIDER provider: openai, anthropic, gemini, or ollama
   DEEPSEEK_API_KEY   API key (CODEAGENT_API_KEY and OPENAI_API_KEY also work)
+  ANTHROPIC_API_KEY  API key when -provider anthropic
+  GEMINI_API_KEY     API key when -provider gemini (GOOGLE_API_KEY also works)
   DEEPSEEK_BASE_URL  API base URL (default https://api.deepseek.com)
   CODEAGENT_MODEL    model name
   CODEAGENT_CONFIG   config file path
@@ -100,6 +106,7 @@ Tips:
 
 type commonFlags struct {
 	configPath string
+	provider   string
 	model      string
 	approval   string
 	cwd        string
@@ -110,6 +117,7 @@ type commonFlags struct {
 
 func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.configPath, "config", "", "config file path")
+	fs.StringVar(&c.provider, "provider", "", "provider: openai, anthropic, gemini, or ollama")
 	fs.StringVar(&c.model, "m", "", "model name")
 	fs.StringVar(&c.model, "model", "", "model name")
 	fs.StringVar(&c.approval, "approval", "", "approval mode: ask, auto, readonly, or plan")
@@ -123,6 +131,11 @@ func (c *commonFlags) register(fs *flag.FlagSet) {
 func (c *commonFlags) apply(cfg *config.Config) error {
 	if c.debug {
 		cfg.Debug = true
+	}
+	if c.provider != "" {
+		if err := cfg.SetProvider(c.provider); err != nil {
+			return err
+		}
 	}
 	if c.model != "" {
 		cfg.Model = strings.TrimSpace(c.model)
@@ -183,8 +196,8 @@ func cmdChat(args []string) int {
 	fs.StringVar(&cf.prompt, "prompt", "", "prompt for a one-shot run (\"-\" reads stdin)")
 	fs.BoolVar(&cf.cont, "c", false, "continue the most recent session")
 	fs.BoolVar(&cf.cont, "continue", false, "continue the most recent session")
-	fs.StringVar(&cf.resume, "r", "", "resume a session by id")
-	fs.StringVar(&cf.resume, "resume", "", "resume a session by id")
+	fs.StringVar(&cf.resume, "r", "", "resume a session by id or title")
+	fs.StringVar(&cf.resume, "resume", "", "resume a session by id or title")
 	fs.BoolVar(&cf.jsonOut, "json", false, "emit NDJSON events (one-shot only)")
 	fs.BoolVar(&cf.reasoning, "reasoning", false, "show the reasoning stream")
 	fs.BoolVar(&cf.plain, "plain", false, "disable colors")
@@ -321,8 +334,11 @@ func selectSession(a *app.App, resume string, cont bool) (*session.Session, erro
 			}
 			return sess, nil
 		}
-		sess, err := a.Sessions.Load(resume)
+		sess, err := a.Sessions.Resolve(resume)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("no session matches %q", resume)
+			}
 			return nil, fmt.Errorf("load session %s: %w", resume, err)
 		}
 		return sess, nil
@@ -440,6 +456,7 @@ func cmdDoctor(args []string) int {
 	fmt.Println(versionString())
 	fmt.Println()
 	fmt.Printf("config file    %s (%s)\n", cfg.ConfigPath, status)
+	fmt.Printf("provider       %s\n", cfg.Provider)
 	fmt.Printf("base url       %s\n", cfg.BaseURL)
 	fmt.Printf("model          %s\n", cfg.Model)
 	fmt.Printf("api key        %s\n", maskKey(cfg.APIKey))
@@ -478,7 +495,7 @@ func cmdDoctor(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	models, err := llm.NewClient(cfg.BaseURL, cfg.APIKey).ListModels(ctx)
+	models, err := llm.NewProvider(cfg.Provider, cfg.BaseURL, cfg.APIKey).ListModels(ctx)
 	if err != nil {
 		fmt.Printf("  ✗ %v\n", err)
 		return 1
@@ -501,10 +518,18 @@ func cmdSessions(args []string) int {
 	var jsonOut bool
 	var limit int
 	var workspace bool
+	var query string
+	var exportRef string
+	var format string
+	var output string
 	fs.StringVar(&configPath, "config", "", "config file path")
 	fs.BoolVar(&jsonOut, "json", false, "print JSON")
 	fs.IntVar(&limit, "n", 20, "maximum number of sessions")
 	fs.BoolVar(&workspace, "workspace", false, "only sessions from the current workspace")
+	fs.StringVar(&query, "q", "", "search titles and transcripts")
+	fs.StringVar(&exportRef, "export", "", "export a session by id or title")
+	fs.StringVar(&format, "format", "md", "export format: md or json")
+	fs.StringVar(&output, "o", "", "export path (default: ./<generated name>, - for stdout)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -522,7 +547,40 @@ func cmdSessions(args []string) int {
 		fmt.Fprintln(os.Stderr, "codedeep:", err)
 		return 1
 	}
-	metas, err := store.List()
+
+	if exportRef != "" {
+		sess, err := store.Resolve(exportRef)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "codedeep:", err)
+			return 1
+		}
+		data, _, name, err := session.Export(sess, format)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "codedeep:", err)
+			return 1
+		}
+		dest := output
+		if dest == "" {
+			dest = name
+		}
+		if dest == "-" {
+			_, _ = os.Stdout.Write(data)
+			return 0
+		}
+		if err := os.WriteFile(dest, data, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "codedeep:", err)
+			return 1
+		}
+		fmt.Printf("exported %s (%d bytes)\n", dest, len(data))
+		return 0
+	}
+
+	var metas []session.Meta
+	if query != "" {
+		metas, err = store.Search(query)
+	} else {
+		metas, err = store.List()
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "codedeep:", err)
 		return 1
@@ -546,7 +604,11 @@ func cmdSessions(args []string) int {
 		return 0
 	}
 	if len(metas) == 0 {
-		fmt.Println("no saved sessions")
+		if query != "" {
+			fmt.Printf("no sessions matching %q\n", query)
+		} else {
+			fmt.Println("no saved sessions")
+		}
 		return 0
 	}
 	fmt.Printf("%-24s  %-16s  %-15s  %7s  %s\n", "ID", "UPDATED", "MODEL", "TOKENS", "TITLE")
@@ -557,6 +619,9 @@ func cmdSessions(args []string) int {
 			util.Truncate(m.Model, 15),
 			humanTokens(m.TotalTokens),
 			util.Truncate(m.Title, 60))
+		if m.Snippet != "" {
+			fmt.Printf("    %s\n", util.Truncate(m.Snippet, 110))
+		}
 	}
 	return 0
 }

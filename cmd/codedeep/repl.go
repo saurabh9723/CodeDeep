@@ -79,7 +79,7 @@ func (a *stdinApprover) Approve(ctx context.Context, req approval.Request) (appr
 	if detail := describeToolArgs(req.Tool, req.Args, 300); detail != "" {
 		fmt.Fprintf(a.out, "  %s\n", a.p.dim(detail))
 	}
-	fmt.Fprintf(a.out, "  %s ", a.p.dim("[a]llow  [f]orever  [d]eny ›"))
+	fmt.Fprintf(a.out, "  %s ", a.p.dim("[a]llow  [f]orever (this command/file)  [d]eny ›"))
 	line, err := a.lines.ReadLine(ctx)
 	if err != nil {
 		fmt.Fprintln(a.out)
@@ -259,13 +259,25 @@ func (r *repl) command(line string) bool {
 		r.render.Notice("new session %s", r.sess.ID)
 
 	case "/sessions":
-		metas, err := r.app.Sessions.List()
+		var metas []session.Meta
+		var err error
+		if arg != "" {
+			metas, err = r.app.Sessions.Search(arg)
+		} else {
+			metas, err = r.app.Sessions.List()
+		}
 		if err != nil {
 			r.render.Notice("cannot list sessions: %v", err)
 			return false
 		}
 		r.listings = metas
+		if arg != "" {
+			r.render.Notice("%d session(s) matching %q", len(metas), arg)
+		}
 		r.printSessions(metas)
+
+	case "/export":
+		r.exportSession(arg)
 
 	case "/resume":
 		r.resume(arg)
@@ -349,8 +361,9 @@ func (r *repl) printHelp() {
 	for _, line := range [][2]string{
 		{"/help", "show this help"},
 		{"/new", "start a new session"},
-		{"/sessions", "list saved sessions"},
-		{"/resume <id|#>", "resume a session (a number refers to the last listing)"},
+		{"/sessions [query]", "list or search saved sessions"},
+		{"/resume <id|#|title>", "resume a session (number refers to the last listing)"},
+		{"/export [md|json] [path]", "export this session (- prints to stdout)"},
 		{"/title <text>", "rename the current session"},
 		{"/model [name]", "show or change the model"},
 		{"/models", "list models from the provider"},
@@ -397,7 +410,7 @@ func (r *repl) printSessions(metas []session.Meta) {
 	if len(metas) > limit {
 		r.render.Notice("… and %d more (use /sessions in a fresh listing)", len(metas)-limit)
 	}
-	r.render.Notice("resume with /resume <number or id>")
+	r.render.Notice("resume with /resume <number, id, or title>")
 }
 
 func (r *repl) resume(arg string) {
@@ -421,13 +434,46 @@ func (r *repl) resume(arg string) {
 		}
 		id = r.listings[n-1].ID
 	}
-	sess, err := r.app.Sessions.Load(id)
+	sess, err := r.app.Sessions.Resolve(id)
 	if err != nil {
 		r.render.Notice("cannot load %s: %v", id, err)
 		return
 	}
 	r.sess = sess
 	r.render.Notice("resumed %s · %d messages · %s", sess.ID, len(sess.Messages), sess.Title)
+}
+
+func (r *repl) exportSession(arg string) {
+	format := "md"
+	fields := strings.Fields(arg)
+	if len(fields) > 0 {
+		switch strings.ToLower(fields[0]) {
+		case "md", "markdown":
+			format = "md"
+			fields = fields[1:]
+		case "json":
+			format = "json"
+			fields = fields[1:]
+		}
+	}
+	dest := strings.TrimSpace(strings.Join(fields, " "))
+	data, _, name, err := session.Export(r.sess, format)
+	if err != nil {
+		r.render.Notice("export failed: %v", err)
+		return
+	}
+	if dest == "" {
+		dest = name
+	}
+	if dest == "-" {
+		_, _ = os.Stdout.Write(data)
+		return
+	}
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		r.render.Notice("export failed: %v", err)
+		return
+	}
+	r.render.Notice("exported %d bytes to %s", len(data), dest)
 }
 
 func (r *repl) listModels() {

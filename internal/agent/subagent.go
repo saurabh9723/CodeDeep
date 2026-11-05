@@ -47,7 +47,7 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 	}
 	depth := a.depth + 1
 
-	a.emit.Emit(Event{
+	a.emitEvent(Event{
 		Type:    EventSubagentStart,
 		Depth:   depth,
 		Name:    args.Description,
@@ -89,7 +89,7 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 	if strings.TrimSpace(report) == "" {
 		report = "(subagent produced no final report)"
 	}
-	a.emit.Emit(Event{
+	a.emitEvent(Event{
 		Type:    EventSubagentEnd,
 		Depth:   depth,
 		Name:    args.Description,

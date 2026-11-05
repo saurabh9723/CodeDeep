@@ -25,6 +25,7 @@ const (
 	maxCheckpoints      = 20
 	maxCheckpointBytes  = 4 << 20
 	maxDiffPreviewBytes = 64 << 10
+	maxParallelTools    = 4
 )
 
 var approvalCounter atomic.Int64
@@ -35,7 +36,7 @@ func newApprovalID() string {
 
 type Options struct {
 	Config     *config.Config
-	Client     *llm.Client
+	Client     llm.Provider
 	Registry   *tools.Registry
 	FS         *tools.FS
 	Sessions   *session.Store
@@ -49,12 +50,13 @@ type Options struct {
 
 type Agent struct {
 	cfg       *config.Config
-	client    *llm.Client
+	client    llm.Provider
 	reg       *tools.Registry
 	fs        *tools.FS
 	sessions  *session.Store
 	approver  approval.Approver
 	emit      Emitter
+	emitMu    sync.Mutex
 	depth     int
 	approval  string
 	autoAllow map[string]bool
@@ -89,16 +91,30 @@ func New(opts Options) *Agent {
 	return a
 }
 
+// emitEvent serializes emission because read-only tool calls can run in
+// parallel.
+func (a *Agent) emitEvent(ev Event) {
+	a.emitMu.Lock()
+	defer a.emitMu.Unlock()
+	a.emit.Emit(ev)
+}
+
 // Run executes one user turn, including every tool call the model requests,
 // and persists the session as it goes.
 func (a *Agent) Run(ctx context.Context, sess *session.Session, prompt string) error {
+	return a.RunWithImages(ctx, sess, prompt, nil)
+}
+
+// RunWithImages is Run with user image attachments.
+func (a *Agent) RunWithImages(ctx context.Context, sess *session.Session, prompt string, images []llm.Image) error {
 	if sess == nil {
 		return fmt.Errorf("nil session")
 	}
-	if strings.TrimSpace(prompt) == "" {
+	if strings.TrimSpace(prompt) == "" && len(images) == 0 {
 		return fmt.Errorf("empty prompt")
 	}
-	sess.Messages = append(sess.Messages, llm.Message{Role: "user", Content: prompt})
+	prompt = strings.TrimSpace(prompt)
+	sess.Messages = append(sess.Messages, llm.Message{Role: "user", Content: prompt, Images: images})
 	sess.Turns++
 	a.session = sess
 	a.turnUsage = llm.Usage{}
@@ -110,7 +126,7 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, prompt string) e
 	a.checkpoint = &sess.Checkpoints[len(sess.Checkpoints)-1]
 	defer a.finishCheckpoint(sess)
 
-	a.emit.Emit(Event{Type: EventUser, SessionID: sess.ID, Text: prompt})
+	a.emitEvent(Event{Type: EventUser, SessionID: sess.ID, Text: prompt, Images: images})
 	a.save(sess)
 
 	system := BuildSystemPrompt(a.cfg, a.depth)
@@ -118,15 +134,15 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, prompt string) e
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			ev := a.doneEvent(sess, "stopped")
-			a.emit.Emit(ev)
+			a.emitEvent(ev)
 		} else {
-			a.emit.Emit(Event{Type: EventError, SessionID: sess.ID, Depth: a.depth, Message: err.Error()})
+			a.emitEvent(Event{Type: EventError, SessionID: sess.ID, Depth: a.depth, Message: err.Error()})
 		}
 		a.save(sess)
 		return err
 	}
 	a.save(sess)
-	a.emit.Emit(a.doneEvent(sess, ""))
+	a.emitEvent(a.doneEvent(sess, ""))
 	return nil
 }
 
@@ -147,7 +163,7 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 		requestMsgs = append(requestMsgs, llm.Message{Role: "system", Content: system})
 		requestMsgs = append(requestMsgs, *msgs...)
 
-		a.emit.Emit(Event{Type: EventAssistantStart, SessionID: sessionID(sess), Depth: a.depth})
+		a.emitEvent(Event{Type: EventAssistantStart, SessionID: sessionID(sess), Depth: a.depth})
 		resp, err := a.client.Stream(ctx, llm.ChatRequest{
 			Model:       a.cfg.Model,
 			Messages:    requestMsgs,
@@ -156,10 +172,10 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 			Temperature: a.cfg.Temperature,
 		}, func(d llm.Delta) error {
 			if d.Reasoning != "" {
-				a.emit.Emit(Event{Type: EventReasoning, SessionID: sessionID(sess), Depth: a.depth, Text: d.Reasoning})
+				a.emitEvent(Event{Type: EventReasoning, SessionID: sessionID(sess), Depth: a.depth, Text: d.Reasoning})
 			}
 			if d.Content != "" {
-				a.emit.Emit(Event{Type: EventText, SessionID: sessionID(sess), Depth: a.depth, Text: d.Content})
+				a.emitEvent(Event{Type: EventText, SessionID: sessionID(sess), Depth: a.depth, Text: d.Content})
 			}
 			return nil
 		})
@@ -198,7 +214,7 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 			sess.Usage = sess.Usage.Add(usage)
 		}
 		total := a.totalUsage(sess)
-		a.emit.Emit(Event{
+		a.emitEvent(Event{
 			Type:       EventUsage,
 			SessionID:  sessionID(sess),
 			Depth:      a.depth,
@@ -228,31 +244,79 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 			return lastText, nil
 		}
 
+		outputs := a.executeToolCalls(ctx, assistant.ToolCalls, sess)
 		for i, tc := range assistant.ToolCalls {
-			if err := ctx.Err(); err != nil {
-				for _, rest := range assistant.ToolCalls[i:] {
-					*msgs = append(*msgs, llm.Message{
-						Role:       "tool",
-						ToolCallID: rest.ID,
-						Content:    "Error: cancelled by user.",
-					})
-				}
-				a.save(sess)
-				return lastText, err
-			}
-			out := a.executeTool(ctx, tc, sess)
 			*msgs = append(*msgs, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    out,
+				Content:    outputs[i],
 			})
-			a.save(sess)
+		}
+		a.save(sess)
+		if err := ctx.Err(); err != nil {
+			return lastText, err
 		}
 	}
 
 	msg := fmt.Sprintf("stopped after %d steps without finishing", maxSteps)
-	a.emit.Emit(Event{Type: EventError, SessionID: sessionID(sess), Depth: a.depth, Message: msg})
+	a.emitEvent(Event{Type: EventError, SessionID: sessionID(sess), Depth: a.depth, Message: msg})
 	return lastText, fmt.Errorf("%s", msg)
+}
+
+// executeToolCalls runs a model turn's tool calls and returns the results in
+// call order. Batches that contain only read-only tools run concurrently.
+func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall, sess *session.Session) []string {
+	results := make([]string, len(calls))
+	if len(calls) < 2 || !a.allReadOnly(calls) {
+		for i, tc := range calls {
+			if ctx.Err() != nil {
+				results[i] = "Error: cancelled by user."
+				continue
+			}
+			results[i] = a.executeTool(ctx, tc, sess)
+		}
+		return results
+	}
+
+	sem := make(chan struct{}, maxParallelTools)
+	var wg sync.WaitGroup
+	for i, tc := range calls {
+		wg.Add(1)
+		go func(i int, tc llm.ToolCall) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[i] = "Error: cancelled by user."
+				return
+			}
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				results[i] = "Error: cancelled by user."
+				return
+			}
+			results[i] = a.executeTool(ctx, tc, sess)
+		}(i, tc)
+	}
+	wg.Wait()
+	return results
+}
+
+func (a *Agent) allReadOnly(calls []llm.ToolCall) bool {
+	for _, tc := range calls {
+		spec, ok := a.reg.Get(tc.Function.Name)
+		if !ok || !spec.ReadOnly {
+			return false
+		}
+		args := strings.TrimSpace(tc.Function.Arguments)
+		if args == "" {
+			args = "{}"
+		}
+		if !json.Valid([]byte(args)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.Session) string {
@@ -267,7 +331,7 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 		eventArgs = encoded
 	}
 
-	a.emit.Emit(Event{
+	a.emitEvent(Event{
 		Type:      EventToolStart,
 		SessionID: sessionID(sess),
 		Depth:     a.depth,
@@ -281,7 +345,7 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 			output = "(no output)"
 		}
 		modelOutput := util.TruncateMiddle(output, 200*1024)
-		a.emit.Emit(Event{
+		a.emitEvent(Event{
 			Type:      EventToolEnd,
 			SessionID: sessionID(sess),
 			Depth:     a.depth,
@@ -303,7 +367,7 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 
 	preview := a.previewTool(ctx, spec, raw)
 	if preview != nil {
-		a.emit.Emit(Event{
+		a.emitEvent(Event{
 			Type:      EventDiff,
 			SessionID: sessionID(sess),
 			Depth:     a.depth,
@@ -354,6 +418,14 @@ func (a *Agent) previewTool(ctx context.Context, spec *tools.Spec, raw json.RawM
 }
 
 func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, sess *session.Session, preview *tools.Preview) (approval.Decision, error) {
+	rawArgs := tc.Function.Arguments
+	if strings.TrimSpace(rawArgs) == "" {
+		rawArgs = "{}"
+	}
+	rule, ruleSet := a.evaluateRules(spec.Name, json.RawMessage(rawArgs))
+	if ruleSet && rule == approval.Deny {
+		return approval.Deny, nil
+	}
 	if spec.ReadOnly {
 		return approval.AllowOnce, nil
 	}
@@ -363,7 +435,11 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 	case "readonly", "plan":
 		return approval.Deny, nil
 	}
-	if a.autoAllow[spec.Name] {
+	if ruleSet && rule == approval.AllowOnce {
+		return approval.AllowOnce, nil
+	}
+	key := allowKey(spec.Name, rawArgs)
+	if a.autoAllow[key] {
 		return approval.AllowOnce, nil
 	}
 	if a.approver == nil {
@@ -380,7 +456,7 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 		req.Path = preview.Path
 		req.Diff = util.TruncateMiddle(preview.Diff, maxDiffPreviewBytes)
 	}
-	a.emit.Emit(Event{
+	a.emitEvent(Event{
 		Type:       EventApproval,
 		SessionID:  sessionID(sess),
 		Depth:      a.depth,
@@ -393,7 +469,7 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 	})
 	dec, err := a.approver.Approve(ctx, req)
 	if err != nil {
-		a.emit.Emit(Event{
+		a.emitEvent(Event{
 			Type:       EventApprovalResult,
 			SessionID:  sessionID(sess),
 			Depth:      a.depth,
@@ -405,9 +481,9 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 		return approval.Deny, err
 	}
 	if dec == approval.AllowAlways {
-		a.autoAllow[spec.Name] = true
+		a.autoAllow[key] = true
 	}
-	a.emit.Emit(Event{
+	a.emitEvent(Event{
 		Type:       EventApprovalResult,
 		SessionID:  sessionID(sess),
 		Depth:      a.depth,
@@ -580,7 +656,7 @@ func (a *Agent) save(sess *session.Session) {
 		return
 	}
 	if err := a.sessions.Save(sess); err != nil {
-		a.emit.Emit(Event{Type: EventError, SessionID: sess.ID, Depth: a.depth, Message: "session save failed: " + err.Error()})
+		a.emitEvent(Event{Type: EventError, SessionID: sess.ID, Depth: a.depth, Message: "session save failed: " + err.Error()})
 	}
 }
 

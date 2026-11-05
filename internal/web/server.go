@@ -5,8 +5,10 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"codedeep/internal/agent"
 	"codedeep/internal/app"
 	"codedeep/internal/approval"
+	"codedeep/internal/llm"
 	"codedeep/internal/session"
 )
 
@@ -51,8 +54,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExportSession)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
+	mux.HandleFunc("POST /api/compact", s.handleCompact)
+	mux.HandleFunc("GET /api/files", s.handleFiles)
+	mux.HandleFunc("GET /api/files/search", s.handleFileSearch)
 	mux.HandleFunc("POST /api/approve", s.handleApprove)
 	mux.HandleFunc("POST /api/undo", s.handleUndo)
 	mux.HandleFunc("POST /api/plan", s.handlePlan)
@@ -110,6 +117,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	approval := s.App.Cfg.ApprovalMode()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"model":           s.App.Cfg.Model,
+		"provider":        s.App.Cfg.Provider,
 		"base_url":        s.App.Cfg.BaseURL,
 		"workspace":       s.App.Cfg.WorkDir,
 		"approval":        approval,
@@ -126,7 +134,13 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	metas, err := s.App.Sessions.List()
+	var metas []session.Meta
+	var err error
+	if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
+		metas, err = s.App.Sessions.Search(q)
+	} else {
+		metas, err = s.App.Sessions.List()
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -147,13 +161,41 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, err := s.App.Sessions.Load(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "session not found")
+	sess, ok := s.resolveSession(w, r.PathValue("id"))
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, sess)
+}
+
+func (s *Server) handleExportSession(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.resolveSession(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	data, contentType, name, err := session.Export(sess, r.URL.Query().Get("format"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) resolveSession(w http.ResponseWriter, ref string) (*session.Session, bool) {
+	sess, err := s.App.Sessions.Resolve(ref)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "session not found")
+		} else {
+			writeError(w, http.StatusConflict, err.Error())
+		}
+		return nil, false
+	}
+	return sess, true
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -174,16 +216,22 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SessionID string `json:"session_id"`
-		Prompt    string `json:"prompt"`
+		SessionID string      `json:"session_id"`
+		Prompt    string      `json:"prompt"`
+		Images    []llm.Image `json:"images"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	req.Prompt = strings.TrimSpace(req.Prompt)
-	if req.Prompt == "" {
+	images, err := validateImages(req.Images)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Prompt == "" && len(images) == 0 {
 		writeError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
@@ -193,7 +241,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var sess *session.Session
-	var err error
 	if req.SessionID != "" {
 		sess, err = s.App.Sessions.Load(req.SessionID)
 		if err != nil {
@@ -250,7 +297,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	emit(agent.Event{Type: "session", SessionID: sess.ID, Message: sess.Title})
 
 	ag := s.App.NewAgent(approval.Func(s.hub.approve), emit)
-	if err := ag.Run(ctx, sess, req.Prompt); err != nil && !errors.Is(err, context.Canceled) {
+	if err := ag.RunWithImages(ctx, sess, req.Prompt, images); err != nil && !errors.Is(err, context.Canceled) {
 		s.App.Logf("chat %s: %v", sess.ID, err)
 	}
 }

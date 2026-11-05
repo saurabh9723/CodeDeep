@@ -37,6 +37,10 @@
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 11a8 8 0 10-2.3 5.7M20 5v6h-6"/></svg>
         </button>
       </div>
+      <label class="session-search-wrap">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input class="session-search" id="sessionSearch" type="search" placeholder="Search sessions…" autocomplete="off" spellcheck="false" aria-label="Search sessions">
+      </label>
       <div class="session-list" id="sessionList"></div>
 
       <div class="sidebar-foot">
@@ -67,6 +71,15 @@
           </div>
         </div>
         <div class="top-actions">
+          <div class="export-wrap">
+            <button class="icon-btn" id="exportBtn" title="Export session" aria-label="Export session" hidden>
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+            </button>
+            <div class="export-menu" id="exportMenu" hidden>
+              <button type="button" data-format="md">Markdown <span>.md</span></button>
+              <button type="button" data-format="json">JSON <span>.json</span></button>
+            </div>
+          </div>
           <button class="icon-btn" id="undoBtn" title="Revert files from the last turn" aria-label="Undo last turn" hidden>
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-1"/></svg>
           </button>
@@ -123,14 +136,33 @@
       </section>
 
       <footer class="composer-wrap">
+        <div class="palette" id="filePalette" hidden>
+          <div class="palette-head">
+            <button class="palette-btn" id="filesUpBtn" type="button" title="Up one level" aria-label="Up one level">↑</button>
+            <span class="palette-path" id="filesPath">/</span>
+            <button class="palette-btn" id="filesCloseBtn" type="button" title="Close" aria-label="Close file picker">×</button>
+          </div>
+          <input class="palette-filter" id="filesFilter" type="text" placeholder="Filter files…" autocomplete="off" spellcheck="false" aria-label="Filter files">
+          <div class="palette-list" id="filesList"></div>
+          <div class="palette-foot" id="filesHint">Click a file to mention it</div>
+        </div>
+        <div class="palette" id="commandPalette" hidden>
+          <div class="palette-list" id="commandList"></div>
+          <div class="palette-foot">↑↓ choose · Enter run · Esc close</div>
+        </div>
         <div class="composer" id="composer">
+          <div class="attachments" id="attachments" hidden></div>
           <textarea id="input" rows="1" placeholder="Ask CodeDeep to build, debug, or explain something…" aria-label="Message"></textarea>
           <div class="composer-bar">
             <div class="composer-hint">
               <span><kbd>Enter</kbd> send</span>
               <span><kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
+              <span><kbd>@</kbd> file · <kbd>/</kbd> commands · paste images</span>
             </div>
             <div class="composer-buttons">
+              <button class="icon-btn" id="filesBtn" title="Mention a file (@)" aria-label="Mention a file">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+              </button>
               <button class="stop-btn" id="stopBtn" hidden>Stop</button>
               <button class="send-btn" id="sendBtn" title="Send message" aria-label="Send message">
                 <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>

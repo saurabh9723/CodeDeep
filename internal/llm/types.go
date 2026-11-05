@@ -12,8 +12,16 @@ type Message struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content,omitempty"`
 	Reasoning  string     `json:"reasoning_content,omitempty"`
+	Images     []Image    `json:"images,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// Image is a base64-encoded user attachment. Data excludes the data-URL
+// prefix; MIME is a media type such as image/png.
+type Image struct {
+	MIME string `json:"mime"`
+	Data string `json:"data"`
 }
 
 type ToolCall struct {
@@ -99,6 +107,7 @@ func EstimatedTokens(msgs []Message) int {
 		total += 4 // role/framing overhead
 		total += len(m.Content) / 4
 		total += len(m.Reasoning) / 4
+		total += len(m.Images) * 1000
 		for _, tc := range m.ToolCalls {
 			total += len(tc.Function.Name)/4 + len(tc.Function.Arguments)/4 + 8
 		}

@@ -1,4 +1,5 @@
 {
+  "provider": "openai",
   "api_key": "",
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
@@ -14,6 +15,11 @@
   "web_addr": "127.0.0.1:7777",
   "debug": false,
   "mcp_servers": {},
+  "permissions": [
+    { "tool": "bash", "action": "allow", "command": "go test*" },
+    { "tool": "bash", "action": "deny", "command": "rm -rf *" },
+    { "tool": "write_file", "action": "allow", "path": "docs/**" }
+  ],
   "pricing": {
     "deepseek-chat": {
       "input_per_mtok": 0.27,

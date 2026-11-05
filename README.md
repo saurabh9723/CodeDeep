@@ -22,9 +22,13 @@ the browser.
   produce a concrete plan. Switch to another mode to execute it.
 - **Git awareness** — read-only `git_status` and `git_diff` tools, plus the
   current branch and uncommitted-change count in the system prompt.
-- **Approvals** — `ask` (default), `auto`, `readonly`, or `plan`; read-only
-  tools are never prompted, and "always allow" is remembered per tool for the
-  session.
+- **Approvals and permission rules** — `ask` (default), `auto`, `readonly`, or
+  `plan`; read-only tools are never prompted. Allow/deny rules can match tools,
+  commands, and paths, and "always allow" is narrowed to the exact command or
+  file rather than the whole tool.
+- **Parallel read-only tools** — a model turn that calls several read-only tools
+  (`read_file`, `glob`, `grep`, `git_*`) runs them concurrently; mutating tool
+  calls stay sequential and ordered.
 - **Context management** — automatic compaction at 80% of the context window
   with a boundary-safe cut, plus `/compact` on demand.
 - **Subagents** — isolated history, shared approvals and checkpoints, nested up
@@ -33,16 +37,27 @@ the browser.
   web UI show token totals and estimated USD per step, turn, and session.
 - **MCP** — starts stdio JSON-RPC servers and exposes their tools as
   `mcp__<server>__<tool>`; `readOnlyHint` tools skip approval.
-- **Sessions** — saved after every step, resumable from the CLI or the web UI.
+- **Sessions** — saved after every step, resumable by id, number, or title,
+  searchable across titles and transcripts, and exportable as Markdown or JSON
+  from the CLI or the web UI.
+- **Providers** — DeepSeek and any OpenAI-compatible endpoint, plus native
+  Anthropic Messages and Gemini generateContent adapters and an Ollama preset;
+  switch with `-provider` or the config file.
 - **Web UI** — Qoder-style interface served from the same binary, no Node or
-  Electron required. Includes diff cards, a plan-mode toggle, and undo.
+  Electron required. Includes diff cards, plan mode, undo, a searchable session
+  sidebar, a file picker with `@`-mentions, a slash-command palette, and
+  image paste/drag-drop for vision models.
+- **Images** — attach up to four PNG/JPEG/WebP/GIF images to a message (5 MB
+  each) in the web UI; they are sent as multimodal content and kept in session
+  exports.
 - **Confinement** — tool paths stay inside the workspace, including symlink
   checks; binary files and build directories are skipped by search tools.
 
 ## Requirements
 
 - Go 1.24 or newer to build.
-- An API key for DeepSeek (or another OpenAI-compatible endpoint).
+- An API key for DeepSeek, Anthropic, Gemini, or another compatible endpoint.
+  A local Ollama server needs no key.
 
 ## Quick start
 
@@ -72,12 +87,20 @@ echo "summarize the last commit" | ./bin/codedeep -p -
 ```bash
 ./bin/codedeep            # start a new session
 ./bin/codedeep -c         # continue the latest session in this workspace
-./bin/codedeep -r <id>    # resume a specific session
+./bin/codedeep -r <id>    # resume a session by id or title
 ```
 
-REPL commands: `/help`, `/new`, `/sessions`, `/resume <id|#>`, `/title`,
-`/model`, `/models`, `/approval`, `/plan [on|off]`, `/undo`, `/reasoning`,
-`/status`, `/tools`, `/compact`, `/clear`, `/quit`.
+REPL commands: `/help`, `/new`, `/sessions [query]`, `/resume <id|#|title>`,
+`/export [md|json] [path]`, `/title`, `/model`, `/models`, `/approval`,
+`/plan [on|off]`, `/undo`, `/reasoning`, `/status`, `/tools`, `/compact`,
+`/clear`, `/quit`.
+
+Sessions can also be searched and exported without entering the REPL:
+
+```bash
+./bin/codedeep sessions -q "flaky test"
+./bin/codedeep sessions -export "parser refactor" -format md -o notes.md
+```
 
 ### Web UI
 
@@ -86,7 +109,11 @@ REPL commands: `/help`, `/new`, `/sessions`, `/resume <id|#>`, `/title`,
 # opens http://127.0.0.1:7777
 ```
 
-`serve` accepts `-addr` and `-no-open`, plus the common flags below.
+`serve` accepts `-addr` and `-no-open`, plus the common flags below. In the
+composer, type `@` (or click the folder button) to browse and mention files,
+`/` for commands such as `/compact` and `/export`, and paste or drag images to
+attach them. The sidebar search matches session titles and transcript text; the
+export button downloads Markdown or JSON.
 
 ### Diagnostics
 
@@ -101,6 +128,7 @@ REPL commands: `/help`, `/new`, `/sessions`, `/resume <id|#>`, `/title`,
 
 - `-config PATH` — config file (default `~/.codedeep/config.json`).
 - `-cwd DIR` — workspace directory (default: current directory).
+- `-provider NAME` — `openai` (default), `anthropic`, `gemini`, or `ollama`.
 - `-m`, `-model NAME` — model name.
 - `-approval MODE` — `ask`, `auto`, `readonly`, or `plan`.
 - `-plan` — shorthand for `-approval plan` (read-only investigation).
@@ -118,6 +146,7 @@ config file is fine. See [`config.example.json`](config.example.json).
 
 ```json
 {
+  "provider": "openai",
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "max_tokens": 8192,
@@ -130,6 +159,11 @@ config file is fine. See [`config.example.json`](config.example.json).
   "web_addr": "127.0.0.1:7777",
   "allow_outside": false,
   "mcp_servers": {},
+  "permissions": [
+    { "tool": "bash", "action": "allow", "command": "go test*" },
+    { "tool": "bash", "action": "deny", "command": "rm -rf *" },
+    { "tool": "write_file", "action": "allow", "path": "docs/**" }
+  ],
   "pricing": {
     "deepseek-chat": {
       "input_per_mtok": 0.27,
@@ -149,7 +183,10 @@ so check your provider's current rates.
 Prefer environment variables over storing keys in files:
 
 ```bash
+CODEAGENT_PROVIDER=openai        # openai, anthropic, gemini, or ollama
 DEEPSEEK_API_KEY=sk-...          # CODEAGENT_API_KEY and OPENAI_API_KEY also work
+ANTHROPIC_API_KEY=sk-ant-...     # when CODEAGENT_PROVIDER=anthropic
+GEMINI_API_KEY=...               # when CODEAGENT_PROVIDER=gemini (GOOGLE_API_KEY also works)
 DEEPSEEK_BASE_URL=...            # CODEAGENT_BASE_URL and OPENAI_BASE_URL also work
 CODEAGENT_MODEL=deepseek-chat
 CODEAGENT_APPROVAL=ask
@@ -166,6 +203,31 @@ CODEAGENT_MCP_CONFIG=$HOME/.codedeep/mcp.json
 
 `work_dir` is always the CLI `-cwd` value or the current directory; it is not
 read from the config file.
+
+### Providers
+
+`provider` (`openai`, `anthropic`, `gemini`, or `ollama`) selects the wire
+protocol. The provider presets fill in a base URL, model, and context window
+only when those fields are still empty or set to the DeepSeek defaults, so an
+explicit `base_url` or `model` always wins.
+
+- **openai** — DeepSeek by default, or any OpenAI-compatible server through
+  `base_url`. Also works for OpenRouter, vLLM, LM Studio, and similar.
+- **anthropic** — the native Messages API, including streamed text, thinking,
+  tool use, and images. Set `ANTHROPIC_API_KEY` (default model
+  `claude-sonnet-4-5`).
+- **gemini** — the native `generateContent` API with SSE streaming, function
+  calls, thinking parts, and inline images. Set `GEMINI_API_KEY` or
+  `GOOGLE_API_KEY` (default model `gemini-2.5-pro`).
+- **ollama** — a local server using the OpenAI-compatible `/v1` endpoint at
+  `http://localhost:11434/v1` (default model `qwen2.5-coder:7b`). No API key is
+  required. Pull the model first with `ollama pull qwen2.5-coder:7b`.
+
+```bash
+codedeep -provider anthropic -m claude-sonnet-4-5 "review internal/agent"
+codedeep -provider gemini -m gemini-2.5-pro "explain this repo"
+codedeep -provider ollama -m qwen2.5-coder:7b "fix the tests"
+```
 
 ### Project instructions
 
@@ -207,6 +269,38 @@ Each turn records a checkpoint of the pre-change contents of every file that
 most recent checkpoint and removes files that did not exist before the turn.
 The last 20 checkpoints are kept with the session.
 
+When a model requests several read-only tools in one turn, CodeDeep runs them
+concurrently (up to four) and still reports results in call order. Any batch
+that contains a mutating tool runs sequentially.
+
+### Permission rules
+
+`permissions` grant or deny tool calls without prompting. Each rule has a
+`tool` glob and an `action` of `allow` or `deny`; `command` and `path` are
+optional globs. When both are present, both must match.
+
+```json
+{
+  "permissions": [
+    { "tool": "bash", "action": "allow", "command": "go test*" },
+    { "tool": "bash", "action": "deny", "command": "rm -rf *" },
+    { "tool": "write_file", "action": "allow", "path": "docs/**" },
+    { "tool": "mcp__github__*", "action": "allow" }
+  ]
+}
+```
+
+- A matching `deny` always wins, including over `auto` and over read-only
+  detection.
+- A matching `allow` skips the prompt in `ask` mode, but `readonly` and `plan`
+  still block mutations.
+- Path patterns are matched relative to the workspace; an absolute path inside
+  the workspace is converted to a relative one. A pattern without `/` also
+  matches the file name at any depth (`*.md`).
+- Command patterns must match the whole command string.
+- Choosing "always allow" in a prompt remembers only that exact command or
+  file, not every use of the tool.
+
 ## MCP servers
 
 MCP servers use stdio JSON-RPC. Add them to the main config:
@@ -247,9 +341,11 @@ go vet ./...
 
 The tests cover glob matching and file tools, workspace confinement and diff
 previews, checkpoint/undo behavior, plan mode, git tools in and out of a
-repository, pricing math, session persistence and titles, config precedence,
-the full agent loop against a fake SSE provider, approval paths, and compaction
-boundaries.
+repository, pricing math, session persistence, search/export, and resume by
+title or id prefix, config precedence and provider presets, permission rules,
+parallel read-only tool batches, the full agent loop against a fake SSE
+provider, approval paths, compaction boundaries, multimodal message encoding,
+and the Anthropic and Gemini streaming adapters.
 
 End-to-end smoke test (builds the binaries, starts the deterministic mock model,
 runs a real tool turn, and checks the written file):
@@ -294,7 +390,7 @@ cmd/mockllm       deterministic OpenAI-compatible test provider
 cmd/mockmcp       deterministic stdio MCP server
 internal/app      wiring: config, client, registry, sessions, MCP
 internal/agent    loop, compaction, subagents, system prompt, checkpoints, events
-internal/llm      OpenAI-compatible streaming client
+internal/llm      provider interface, OpenAI-compatible and Anthropic/Gemini clients
 internal/diff     unified diff engine for previews
 internal/tools    registry plus file, search, shell, and git tools
 internal/mcp      stdio JSON-RPC client and tool registration
@@ -321,7 +417,6 @@ consistent.
 
 ## Roadmap
 
-- Session search and export.
 - Optional web authentication and remote bind support.
-- More providers and image input.
 - Per-tool cost attribution inside a turn.
+- Additional provider-specific reasoning controls.
