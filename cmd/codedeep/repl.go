@@ -17,6 +17,7 @@ import (
 	"codedeep/internal/app"
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
+	"codedeep/internal/editor"
 	"codedeep/internal/session"
 	"codedeep/internal/util"
 )
@@ -340,6 +341,24 @@ func (r *repl) command(line string) bool {
 	case "/tools":
 		r.printTools()
 
+	case "/skills":
+		r.printSkills()
+
+	case "/skill":
+		r.runSkill(arg)
+
+	case "/jobs":
+		r.printJobs()
+
+	case "/job":
+		r.printJob(arg)
+
+	case "/kill":
+		r.killJob(arg)
+
+	case "/open":
+		r.openInEditor(arg)
+
 	case "/compact":
 		r.compact()
 
@@ -373,6 +392,12 @@ func (r *repl) printHelp() {
 		{"/reasoning", "toggle the reasoning stream"},
 		{"/status", "session and runtime status"},
 		{"/tools", "list available tools"},
+		{"/skills", "list workspace skills"},
+		{"/skill <name> [task]", "load a skill and run it on a task"},
+		{"/jobs", "list background jobs"},
+		{"/job <id>", "show output from a background job"},
+		{"/kill <id>", "stop a background job"},
+		{"/open <path>[:line]", "open a file in your editor"},
 		{"/compact", "summarize older messages to free context"},
 		{"/clear", "clear the screen"},
 		{"/quit", "exit"},
@@ -566,6 +591,122 @@ func (r *repl) printTools() {
 		fmt.Fprintf(os.Stdout, "  %s %-22s %s\n", marker, p.cyan(spec.Name), p.dim(util.FirstLine(spec.Description, 88)))
 	}
 	fmt.Fprintln(os.Stdout, p.dim("  r = read-only (never needs approval)"))
+}
+
+func (r *repl) printSkills() {
+	list := r.app.Skills.List()
+	fmt.Fprintln(os.Stdout, r.render.p.bold("Skills"))
+	if len(list) == 0 {
+		r.render.Notice("no skills found — add markdown files to .codedeep/skills/")
+		return
+	}
+	for _, skill := range list {
+		fmt.Fprintf(os.Stdout, "  %-20s %s\n", r.render.p.cyan(skill.Name), r.render.p.dim(skill.Description))
+	}
+	r.render.Notice("run one with /skill <name> <task>")
+}
+
+func (r *repl) runSkill(arg string) {
+	fields := strings.Fields(arg)
+	if len(fields) == 0 {
+		r.render.Notice("usage: /skill <name> [task] (see /skills)")
+		return
+	}
+	skill, ok := r.app.Skills.Get(fields[0])
+	if !ok {
+		r.render.Notice("unknown skill %q — run /skills", fields[0])
+		return
+	}
+	task := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
+	if task == "" {
+		fmt.Fprintln(os.Stdout, skill.Body)
+		r.render.Notice("loaded %s — add a task with /skill %s <task>", skill.Name, skill.Name)
+		return
+	}
+	r.runTurn(skill.Prompt(task))
+}
+
+func (r *repl) printJobs() {
+	list := r.app.Jobs.List()
+	if len(list) == 0 {
+		r.render.Notice("no background jobs — use bash with background=true or ask the agent to start one")
+		return
+	}
+	p := r.render.p
+	fmt.Fprintln(os.Stdout, p.bold("Background jobs"))
+	for _, j := range list {
+		fmt.Fprintf(os.Stdout, "  %-8s %-8s exit=%-3d pid=%-7d %s\n",
+			p.cyan(j.ID), jobStatus(p, j.Status), j.ExitCode, j.PID, p.dim(util.Truncate(j.Command, 80)))
+	}
+}
+
+func jobStatus(p styles, status string) string {
+	switch status {
+	case "running":
+		return p.yellow(status)
+	case "killed":
+		return p.red(status)
+	default:
+		return p.dim(status)
+	}
+}
+
+func (r *repl) printJob(arg string) {
+	if arg == "" {
+		r.render.Notice("usage: /job <id> (see /jobs)")
+		return
+	}
+	job, ok := r.app.Jobs.Get(arg)
+	if !ok {
+		r.render.Notice("unknown job %q — run /jobs", arg)
+		return
+	}
+	snap := job.Snapshot()
+	fmt.Fprintf(os.Stdout, "%s · %s · exit %d · pid %d\n", snap.ID, snap.Status, snap.ExitCode, snap.PID)
+	if strings.TrimSpace(snap.Output) == "" {
+		r.render.Notice("(no output yet)")
+		return
+	}
+	fmt.Fprintln(os.Stdout, snap.Output)
+	if snap.Truncated {
+		r.render.Notice("older output was discarded")
+	}
+}
+
+func (r *repl) killJob(arg string) {
+	if arg == "" {
+		r.render.Notice("usage: /kill <id> (see /jobs)")
+		return
+	}
+	job, ok := r.app.Jobs.Get(arg)
+	if !ok {
+		r.render.Notice("unknown job %q — run /jobs", arg)
+		return
+	}
+	if err := job.Kill(); err != nil {
+		r.render.Notice("%v", err)
+		return
+	}
+	job.Wait(2 * time.Second)
+	snap := job.Snapshot()
+	r.render.Notice("stopped %s (%s)", snap.ID, snap.Status)
+}
+
+func (r *repl) openInEditor(arg string) {
+	target, err := editor.Resolve(r.cfg.WorkDir, arg)
+	if err != nil {
+		r.render.Notice("open: %v", err)
+		return
+	}
+	if err := editor.Open(r.cfg, target); err != nil {
+		r.render.Notice("open: %v", err)
+		return
+	}
+	where := target.Path
+	if target.Line > 0 {
+		where = fmt.Sprintf("%s:%d", where, target.Line)
+	}
+	r.render.Notice("opened %s", where)
 }
 
 func (r *repl) compact() {

@@ -9,9 +9,11 @@ import (
 	"codedeep/internal/agent"
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
+	"codedeep/internal/jobs"
 	"codedeep/internal/llm"
 	"codedeep/internal/mcp"
 	"codedeep/internal/session"
+	"codedeep/internal/skills"
 	"codedeep/internal/tools"
 )
 
@@ -22,6 +24,8 @@ type App struct {
 	Registry *tools.Registry
 	FS       *tools.FS
 	Sessions *session.Store
+	Skills   *skills.Catalog
+	Jobs     *jobs.Manager
 	Logf     func(format string, args ...any)
 
 	mcpClients []*mcp.Client
@@ -39,7 +43,11 @@ func New(cfg *config.Config) (*App, error) {
 	}
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	registry := tools.NewRegistry()
-	tools.RegisterCore(registry, fsys, cfg.Shell)
+	manager := jobs.NewManager(cfg.Shell, cfg.WorkDir)
+	tools.RegisterCoreWithJobs(registry, fsys, cfg.Shell, manager)
+	jobs.RegisterTools(registry, manager)
+	catalog := skills.Discover(cfg.WorkDir, cfg.Home)
+	catalog.RegisterTools(registry)
 	client := llm.NewProvider(cfg.Provider, cfg.BaseURL, cfg.APIKey)
 
 	a := &App{
@@ -48,6 +56,8 @@ func New(cfg *config.Config) (*App, error) {
 		Registry: registry,
 		FS:       fsys,
 		Sessions: store,
+		Skills:   catalog,
+		Jobs:     manager,
 		Logf:     logf,
 	}
 
@@ -64,6 +74,9 @@ func New(cfg *config.Config) (*App, error) {
 }
 
 func (a *App) Close() {
+	if a.Jobs != nil {
+		a.Jobs.Close()
+	}
 	for _, c := range a.mcpClients {
 		c.Close()
 	}
@@ -78,6 +91,7 @@ func (a *App) NewAgent(approver approval.Approver, emit agent.Emitter) *agent.Ag
 		Sessions: a.Sessions,
 		Approver: approver,
 		Emitter:  emit,
+		Skills:   a.Skills,
 	})
 }
 

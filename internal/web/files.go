@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"codedeep/internal/approval"
+	"codedeep/internal/editor"
 )
 
 type fileEntry struct {
@@ -188,4 +190,34 @@ func withinRoot(root, abs string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// handleOpen launches the configured editor for a workspace file.
+func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+		Line int    `json:"line"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	ref := strings.TrimSpace(req.Path)
+	if req.Line > 0 {
+		ref = fmt.Sprintf("%s:%d", ref, req.Line)
+	}
+	target, err := editor.Resolve(s.App.Cfg.WorkDir, ref)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := editor.Open(s.App.Cfg, target); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"opened": target.Path,
+		"line":   target.Line,
+	})
 }

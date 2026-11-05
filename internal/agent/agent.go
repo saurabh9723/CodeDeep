@@ -14,8 +14,11 @@ import (
 
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
+	"codedeep/internal/diagnostics"
+	"codedeep/internal/hooks"
 	"codedeep/internal/llm"
 	"codedeep/internal/session"
+	"codedeep/internal/skills"
 	"codedeep/internal/tools"
 	"codedeep/internal/util"
 )
@@ -46,6 +49,7 @@ type Options struct {
 	Session    *session.Session
 	Checkpoint *session.Checkpoint
 	Approval   string
+	Skills     *skills.Catalog
 }
 
 type Agent struct {
@@ -56,6 +60,9 @@ type Agent struct {
 	sessions  *session.Store
 	approver  approval.Approver
 	emit      Emitter
+	hooks     *hooks.Runner
+	diag      *diagnostics.Runner
+	skills    *skills.Catalog
 	emitMu    sync.Mutex
 	depth     int
 	approval  string
@@ -81,6 +88,9 @@ func New(opts Options) *Agent {
 		sessions:   opts.Sessions,
 		approver:   opts.Approver,
 		emit:       opts.Emitter,
+		hooks:      hooks.New(opts.Config, opts.Config.WorkDir),
+		diag:       diagnostics.New(opts.Config, opts.Config.WorkDir),
+		skills:     opts.Skills,
 		depth:      depth,
 		approval:   opts.Approval,
 		autoAllow:  map[string]bool{},
@@ -129,7 +139,7 @@ func (a *Agent) RunWithImages(ctx context.Context, sess *session.Session, prompt
 	a.emitEvent(Event{Type: EventUser, SessionID: sess.ID, Text: prompt, Images: images})
 	a.save(sess)
 
-	system := BuildSystemPrompt(a.cfg, a.depth)
+	system := BuildSystemPrompt(a.cfg, a.depth, a.skills)
 	_, err := a.runLoop(ctx, &sess.Messages, system, sess, a.cfg.MaxSteps)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -392,14 +402,121 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 		return finish("Error: permission denied for "+name+". Do not retry this call; change approach or explain what you need.", true)
 	}
 
+	var prefix strings.Builder
+	if a.hooks.HasPre() {
+		blocked, outcomes := a.hooks.RunPre(ctx, name, raw, sessionID(sess))
+		a.emitHookOutcomes(tc, sess, outcomes)
+		for _, out := range outcomes {
+			if strings.TrimSpace(out.Output) == "" {
+				continue
+			}
+			if out.IsError {
+				fmt.Fprintf(&prefix, "[pre-hook failed: %s] %s\n", out.Command, out.Output)
+			} else {
+				fmt.Fprintf(&prefix, "[pre-hook] %s\n", out.Output)
+			}
+		}
+		if blocked {
+			msg := "Error: " + name + " was blocked by a pre-tool hook."
+			if strings.TrimSpace(prefix.String()) != "" {
+				msg += "\n" + strings.TrimSpace(prefix.String())
+			}
+			return finish(msg, true)
+		}
+	}
+
 	result, runErr := spec.Run(ctx, raw)
 	if runErr != nil {
-		return finish("Error: "+runErr.Error(), true)
+		a.runPostHooks(ctx, tc, raw, sess, "Error: "+runErr.Error(), true)
+		return finish(prefix.String()+"Error: "+runErr.Error(), true)
 	}
 	if result.Change != nil {
 		a.recordChange(result.Change)
 	}
-	return finish(result.Output, result.IsError)
+
+	output := prefix.String() + result.Output
+	if result.Change != nil && a.diag.Enabled() {
+		outcomes := a.diag.RunAfterChange(ctx, result.Change.Path)
+		a.emitDiagnosticOutcomes(tc, sess, result.Change.Path, outcomes)
+		output += formatDiagnostics(outcomes)
+	}
+	output += a.runPostHooks(ctx, tc, raw, sess, output, result.IsError)
+	return finish(output, result.IsError)
+}
+
+func (a *Agent) runPostHooks(ctx context.Context, tc llm.ToolCall, raw json.RawMessage, sess *session.Session, output string, isErr bool) string {
+	if !a.hooks.HasPost() {
+		return ""
+	}
+	outcomes := a.hooks.RunPost(ctx, tc.Function.Name, raw, sessionID(sess), output, isErr)
+	a.emitHookOutcomes(tc, sess, outcomes)
+	var b strings.Builder
+	for _, out := range outcomes {
+		switch {
+		case out.IsError:
+			fmt.Fprintf(&b, "[post-hook failed: %s] %s\n", out.Command, out.Output)
+		case strings.TrimSpace(out.Output) != "":
+			fmt.Fprintf(&b, "[post-hook] %s\n", out.Output)
+		}
+	}
+	return b.String()
+}
+
+func formatDiagnostics(outcomes []diagnostics.Outcome) string {
+	if len(outcomes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n[diagnostics]\n")
+	for _, out := range outcomes {
+		status := "ok"
+		if out.IsError {
+			status = "failed"
+		}
+		fmt.Fprintf(&b, "$ %s (%s)\n", out.Command, status)
+		if strings.TrimSpace(out.Output) != "" {
+			b.WriteString(out.Output)
+			if !strings.HasSuffix(out.Output, "\n") {
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String()
+}
+
+func (a *Agent) emitHookOutcomes(tc llm.ToolCall, sess *session.Session, outcomes []hooks.Outcome) {
+	for _, out := range outcomes {
+		text := out.Output
+		if out.Command != "" {
+			text = "$ " + out.Command + "\n" + text
+		}
+		a.emitEvent(Event{
+			Type:      EventHook,
+			SessionID: sessionID(sess),
+			Depth:     a.depth,
+			Name:      out.Phase,
+			Message:   tc.Function.Name,
+			Output:    util.TruncateMiddle(text, 8*1024),
+			IsError:   out.IsError,
+			CallID:    tc.ID,
+		})
+	}
+}
+
+func (a *Agent) emitDiagnosticOutcomes(tc llm.ToolCall, sess *session.Session, path string, outcomes []diagnostics.Outcome) {
+	for _, out := range outcomes {
+		a.emitEvent(Event{
+			Type:      EventDiagnostics,
+			SessionID: sessionID(sess),
+			Depth:     a.depth,
+			Name:      out.Pattern,
+			Message:   out.Command,
+			Path:      path,
+			Output:    util.TruncateMiddle(out.Output, 8*1024),
+			IsError:   out.IsError,
+			CallID:    tc.ID,
+		})
+	}
 }
 
 func (a *Agent) previewTool(ctx context.Context, spec *tools.Spec, raw json.RawMessage) *tools.Preview {

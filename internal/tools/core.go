@@ -7,6 +7,12 @@ import (
 
 // RegisterCore wires the built-in coding tools into a registry.
 func RegisterCore(r *Registry, f *FS, shell string) {
+	RegisterCoreWithJobs(r, f, shell, nil)
+}
+
+// RegisterCoreWithJobs wires the built-in tools and enables bash background
+// mode when bg is non-nil.
+func RegisterCoreWithJobs(r *Registry, f *FS, shell string, bg BackgroundStarter) {
 	r.Register(&Spec{
 		Name: "read_file",
 		Description: "Read a text file from the workspace. Returns 1-based numbered lines. " +
@@ -80,13 +86,15 @@ func RegisterCore(r *Registry, f *FS, shell string) {
 		Name: "bash",
 		Description: "Run a shell command in the workspace. Returns combined stdout/stderr and the exit code. " +
 			"Use for builds, tests, package managers, git, and other non-interactive commands. " +
-			"Set timeout_sec for long-running commands (default 120, max 900). Do not run interactive programs.",
+			"Set timeout_sec for long-running commands (default 120, max 900). Do not run interactive programs. " +
+			"Set background=true for servers, watchers, or long builds; then use job_output and job_kill.",
 		Params: Object(map[string]any{
 			"command":     StrProp("Shell command to execute."),
 			"timeout_sec": IntProp("Timeout in seconds.", 120),
+			"background":  BoolProp("Run in the background and return a job id immediately."),
 		}, "command"),
 		Run: func(ctx context.Context, raw json.RawMessage) (Result, error) {
-			return f.runShell(ctx, shell, raw)
+			return f.runShell(ctx, shell, bg, raw)
 		},
 	})
 

@@ -1070,6 +1070,31 @@ kbd {
 .palette-icon { width: 14px; flex: none; text-align: center; color: var(--faint); font-size: 11px; }
 .palette-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-desc { flex: none; color: var(--faint); font-size: 11px; }
+.palette-open {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  color: var(--faint);
+  font-size: 12px;
+}
+.palette-open:hover, .palette-open:focus-visible {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--panel);
+  outline: none;
+}
+.skill-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+.skill-name { min-width: 0; overflow-wrap: anywhere; }
+.skill-path { flex: none; color: var(--faint); font-size: 10.5px; }
 .palette-foot { padding: 6px 12px 8px; border-top: 1px solid var(--border-soft); color: var(--faint); font-size: 10.5px; }
 .palette-empty { padding: 16px; text-align: center; color: var(--faint); font-size: 12px; }
 .send-btn {

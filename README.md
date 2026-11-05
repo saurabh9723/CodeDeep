@@ -50,6 +50,18 @@ the browser.
 - **Images** — attach up to four PNG/JPEG/WebP/GIF images to a message (5 MB
   each) in the web UI; they are sent as multimodal content and kept in session
   exports.
+- **Hooks** — pre- and post-tool shell hooks receive a JSON payload on stdin and
+  `CODEDEEP_*` environment variables; a failing pre-hook can block the call.
+- **Post-edit diagnostics** — pattern-matched build, vet, or lint commands run
+  after a file change and their output is fed back to the model.
+- **Skills** — markdown instruction packs in `.codedeep/skills` (project) and
+  `~/.codedeep/skills` (global), loaded by the `use_skill` tool or `/skill`.
+- **Background jobs** — `bash` can run a command in the background; `job_output`,
+  `job_list`, and `job_kill` manage it from the agent, CLI, or web UI.
+- **Web authentication** — an optional bearer/cookie token protects the UI, and
+  the server refuses non-loopback binds without a token.
+- **Editor integration** — `codedeep open`, REPL `/open`, and a web file-picker
+  action jump to files in your configured editor.
 - **Confinement** — tool paths stay inside the workspace, including symlink
   checks; binary files and build directories are skipped by search tools.
 
@@ -93,7 +105,8 @@ echo "summarize the last commit" | ./bin/codedeep -p -
 REPL commands: `/help`, `/new`, `/sessions [query]`, `/resume <id|#|title>`,
 `/export [md|json] [path]`, `/title`, `/model`, `/models`, `/approval`,
 `/plan [on|off]`, `/undo`, `/reasoning`, `/status`, `/tools`, `/compact`,
-`/clear`, `/quit`.
+`/skills`, `/skill <name> [task]`, `/jobs`, `/job <id>`, `/kill <id>`,
+`/open [path[:line]]`, `/clear`, `/quit`.
 
 Sessions can also be searched and exported without entering the REPL:
 
@@ -111,9 +124,18 @@ Sessions can also be searched and exported without entering the REPL:
 
 `serve` accepts `-addr` and `-no-open`, plus the common flags below. In the
 composer, type `@` (or click the folder button) to browse and mention files,
-`/` for commands such as `/compact` and `/export`, and paste or drag images to
-attach them. The sidebar search matches session titles and transcript text; the
-export button downloads Markdown or JSON.
+`/` for commands such as `/compact`, `/export`, `/skills`, `/skill`, `/open`, and
+paste or drag images to attach them. The sidebar search matches session titles
+and transcript text; the export button downloads Markdown or JSON. File-picker
+rows have an `↗` action that opens the file in your editor.
+
+Set `web_token` (or `CODEAGENT_WEB_TOKEN`) to require sign-in. The server also
+refuses to listen on a non-loopback address without a token unless
+`web_insecure` is explicitly true:
+
+```bash
+CODEAGENT_WEB_TOKEN=long-random-string ./bin/codedeep serve -addr 0.0.0.0:7777
+```
 
 ### Diagnostics
 
@@ -157,8 +179,23 @@ config file is fine. See [`config.example.json`](config.example.json).
   "max_steps": 60,
   "shell": "",
   "web_addr": "127.0.0.1:7777",
+  "web_token": "",
+  "web_insecure": false,
   "allow_outside": false,
   "mcp_servers": {},
+  "hooks": {
+    "pre_tool": [
+      { "command": "gofmt -l .", "tools": ["write_file", "edit_file"], "timeout_sec": 10 }
+    ],
+    "post_tool": [
+      { "command": "echo hook-finished", "tools": ["bash"], "timeout_sec": 10 }
+    ]
+  },
+  "diagnostics": [
+    { "pattern": "*.go", "command": "go vet ./..." }
+  ],
+  "diagnostic_timeout_sec": 30,
+  "editor": { "command": "code", "args": ["-g", "{file}:{line}"] },
   "permissions": [
     { "tool": "bash", "action": "allow", "command": "go test*" },
     { "tool": "bash", "action": "deny", "command": "rm -rf *" },
@@ -195,6 +232,9 @@ CODEAGENT_COMPACT_AT=0.8
 CODEAGENT_MAX_STEPS=60
 CODEAGENT_SESSIONS_DIR=$HOME/.codedeep/sessions
 CODEAGENT_WEB_ADDR=127.0.0.1:7777
+CODEAGENT_WEB_TOKEN=long-random-string
+CODEAGENT_WEB_INSECURE=false
+CODEAGENT_DIAGNOSTIC_TIMEOUT=30
 CODEAGENT_ALLOW_OUTSIDE=false
 CODEAGENT_DEBUG=false
 CODEAGENT_CONFIG=$HOME/.codedeep/config.json
@@ -236,6 +276,122 @@ On every run CodeDeep reads `AGENTS.md`, `CODEAGENT.md`, and
 `~/.codedeep/AGENTS.md`. Closest files take precedence. Use these for build
 commands, conventions, and constraints.
 
+### Skills
+
+Skills are reusable instruction packs stored as markdown files. Put project
+skills in `.codedeep/skills/*.md` and personal skills in
+`~/.codedeep/skills/*.md`; a project skill overrides a global one with the same
+name. Optional frontmatter sets the name and description:
+
+```markdown
+---
+name: review
+description: Review a change for correctness and regressions
+---
+
+Read the diff, then report bugs before style issues. Quote file and line
+numbers. Do not modify files.
+```
+
+The names and descriptions are added to the system prompt, and the model can
+load a skill with the read-only `use_skill` tool. From the CLI, `/skills` lists
+them and `/skill review src/parser.go` sends the skill instructions plus a task.
+In the web composer, `/skills` lists them and `/skill review <task>` starts a
+run with the skill body.
+
+### Hooks
+
+Hooks run shell commands around tool calls. `tools` restricts a hook to named
+tools (an empty list matches every tool). Each hook gets a JSON object on stdin:
+
+```json
+{
+  "event": "pre_tool",
+  "tool": "edit_file",
+  "args": { "path": "main.go", "old_string": "...", "new_string": "..." },
+  "session_id": "…",
+  "cwd": "/path/to/workspace",
+  "result": "…",
+  "is_error": false
+}
+```
+
+The hook process also sees `CODEDEEP_HOOK_EVENT`, `CODEDEEP_TOOL`,
+`CODEDEEP_SESSION_ID`, and `CODEDEEP_WORKDIR`. Output is shown in the transcript
+and prepended to the tool result. A failing pre-hook is reported but does not
+stop the tool unless `block_on_failure` is true; post-hooks never block. The
+default timeout is 10 seconds (maximum 300).
+
+```json
+{
+  "hooks": {
+    "pre_tool": [
+      { "command": "gofmt -l .", "tools": ["write_file", "edit_file"], "block_on_failure": true }
+    ],
+    "post_tool": [
+      { "command": "echo done >> .codedeep/hooks.log", "tools": ["bash"] }
+    ]
+  }
+}
+```
+
+### Post-edit diagnostics
+
+After a tool reports a file change, CodeDeep runs each matching diagnostic
+command in the workspace and appends its output to the tool result. A pattern
+without `/` matches the file name at any depth; otherwise it matches the
+workspace-relative path. `{file}` expands to the relative path and `{abs}` to
+the absolute path. Diagnostics are best effort — a non-zero exit is reported to
+the model, not treated as a failed edit.
+
+```json
+{
+  "diagnostics": [
+    { "pattern": "*.go", "command": "go vet ./..." },
+    { "pattern": "web/**/*.ts", "command": "npx tsc --noEmit" },
+    { "pattern": "*.py", "command": "python -m py_compile \"{abs}\"" }
+  ],
+  "diagnostic_timeout_sec": 30
+}
+```
+
+### Background jobs
+
+Pass `background: true` to `bash` to start a long-running command without
+blocking the turn. The agent gets a job id and can use `job_output` to read the
+tail, `job_list` to see status, and `job_kill` to stop the process tree. The
+REPL exposes the same operations as `/jobs`, `/job <id>`, and `/kill <id>`.
+
+Jobs keep up to 256 KB of combined output, at most 32 jobs are retained, and
+jobs are stopped when CodeDeep exits.
+
+### Editor integration
+
+`editor` selects the command used by `codedeep open`, the REPL `/open`, and the
+web file-picker action. Args expand `{file}` and `{line}`; if `{file}` is absent
+the path is appended. Without an editor config, `$VISUAL`, `$EDITOR`, and
+finally `code -g` are tried.
+
+```bash
+codedeep open src/main.go:42
+# REPL: /open src/main.go:42
+```
+
+```json
+{
+  "editor": { "command": "code", "args": ["-g", "{file}:{line}"] }
+}
+```
+
+### Remote access
+
+Set `web_token` or `CODEAGENT_WEB_TOKEN` to protect the web UI. The browser
+exchanges the token for an HttpOnly `SameSite=Strict` cookie at `/login`;
+scripts can send `Authorization: Bearer <token>` instead. A `?token=` link is
+accepted once and immediately redirected to a clean URL. Without a token the
+server only binds to loopback by default; a non-loopback `-addr` is refused
+unless `web_insecure` is true.
+
 ## Tools and approvals
 
 Built-in tools:
@@ -246,16 +402,20 @@ Built-in tools:
   unique match unless `replace_all` is set.
 - `glob` — `*`, `?`, `[...]`, and `**` patterns.
 - `grep` — RE2 search with an optional file filter and case-insensitive mode.
-- `bash` — shell command with timeout and combined stdout/stderr.
+- `bash` — shell command with timeout and combined stdout/stderr; set
+  `background: true` to run it as a background job.
+- `job_output`, `job_list`, `job_kill` — read, list, and stop background jobs.
 - `git_status` — branch, upstream state, last commit, and changed files.
 - `git_diff` — unified diff of uncommitted changes; supports `staged`, `stat`,
   `path`, and `context`.
 - `agent` — delegate a self-contained task to a subagent.
+- `use_skill` — load a workspace or global skill from `.codedeep/skills`.
 
 `glob` and `grep` skip `.git`, `node_modules`, `vendor`, `dist`, `build`,
-virtualenvs, caches, and other generated directories. Five tools are read-only
-and never prompt: `read_file`, `glob`, `grep`, `git_status`, and `git_diff`.
-Everything else follows the approval mode:
+virtualenvs, caches, and other generated directories. The read-only tools
+(`read_file`, `glob`, `grep`, `git_status`, `git_diff`, `job_output`,
+`job_list`, `use_skill`) never prompt. Everything else follows the approval
+mode:
 
 - `ask` — prompt before each mutating tool call; choose allow once, always
   allow, or deny. When the call has a preview, the prompt includes the diff.
@@ -345,7 +505,10 @@ repository, pricing math, session persistence, search/export, and resume by
 title or id prefix, config precedence and provider presets, permission rules,
 parallel read-only tool batches, the full agent loop against a fake SSE
 provider, approval paths, compaction boundaries, multimodal message encoding,
-and the Anthropic and Gemini streaming adapters.
+the Anthropic and Gemini streaming adapters, hooks and diagnostics (including
+blocking and timeouts), skill discovery and `use_skill`, background jobs and
+their tools, editor resolution, and web authentication (bearer, cookie, login,
+and query-token flows).
 
 End-to-end smoke test (builds the binaries, starts the deterministic mock model,
 runs a real tool turn, and checks the written file):
@@ -394,29 +557,40 @@ internal/llm      provider interface, OpenAI-compatible and Anthropic/Gemini cli
 internal/diff     unified diff engine for previews
 internal/tools    registry plus file, search, shell, and git tools
 internal/mcp      stdio JSON-RPC client and tool registration
+internal/hooks    pre/post tool shell hooks
+internal/diagnostics post-edit build, vet, and lint commands
+internal/skills   markdown skill discovery and the use_skill tool
+internal/jobs     background process manager and job tools
+internal/editor   external editor resolution and launch
+internal/proc     process-tree setup and termination
 internal/session  atomic JSON session store with checkpoints
-internal/web      HTTP API, NDJSON streaming, embedded web UI
+internal/web      HTTP API, auth, NDJSON streaming, embedded web UI
 internal/approval approval interface and decisions
 ```
 
 The agent emits typed events (`text`, `reasoning`, `tool_start`, `tool_end`,
-`diff`, `approval_request`, `usage`, `compact`, `subagent_start`, `done`, …).
-The CLI renderer and the web UI both consume the same events, so behavior stays
-consistent.
+`diff`, `approval_request`, `usage`, `compact`, `subagent_start`, `hook`,
+`diagnostics`, `done`, …). The CLI renderer and the web UI both consume the same
+events, so behavior stays consistent.
 
 ## Security notes
 
 - Tool paths are confined to the workspace by default; set `allow_outside` only
   if you need it.
 - Mutating tools require approval unless you opt into `auto`.
-- The web UI binds to `127.0.0.1` by default and has no authentication. Do not
-  expose it to untrusted networks; use a reverse proxy with auth if you must.
+- The web UI binds to `127.0.0.1` by default. Set `web_token` before binding to
+  another interface; the server refuses an unauthenticated non-loopback bind
+  unless `web_insecure` is explicitly enabled. Cookies are HttpOnly and
+  `SameSite=Strict`, and bearer tokens are compared in constant time.
+- Hooks and diagnostics run shell commands you configure. Treat the config file
+  as trusted input, and remember that hooks run with the same permissions as
+  CodeDeep.
 - Keep API keys in environment variables, not in committed config files.
 - The agent is instructed not to run destructive commands without explicit
   intent, but approval mode is the real guardrail.
 
 ## Roadmap
 
-- Optional web authentication and remote bind support.
 - Per-tool cost attribution inside a turn.
 - Additional provider-specific reasoning controls.
+- Richer diagnostics mapping (inline line annotations instead of appended text).

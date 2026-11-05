@@ -21,6 +21,7 @@ var configEnvVars = []string{
 	"CODEAGENT_SHELL", "CODEAGENT_MAX_STEPS", "CODEAGENT_WEB_ADDR",
 	"CODEAGENT_DEBUG", "CODEAGENT_ALLOW_OUTSIDE",
 	"CODEAGENT_CONFIG", "CODEAGENT_MCP_CONFIG",
+	"CODEAGENT_WEB_TOKEN", "CODEAGENT_WEB_INSECURE", "CODEAGENT_DIAGNOSTIC_TIMEOUT",
 }
 
 func clearConfigEnv(t *testing.T) {
@@ -220,6 +221,65 @@ func TestMCPConfigFileErrors(t *testing.T) {
 	}
 	if _, err := Load(cfgPath); err == nil || !strings.Contains(err.Error(), "MCP config") {
 		t.Fatalf("expected MCP config error, got %v", err)
+	}
+}
+
+func TestTier3ConfigNormalization(t *testing.T) {
+	cfg := loadFrom(t, `{
+		"hooks": {
+			"pre_tool": [
+				{"command": " gofmt -l . ", "tools": [" edit_file ", ""]},
+				{"command": "   "}
+			],
+			"post_tool": [{"command": "echo done", "timeout_sec": 999}]
+		},
+		"diagnostics": [
+			{"pattern": " *.go ", "command": " go vet ./... "},
+			{"pattern": "", "command": "never"}
+		],
+		"diagnostic_timeout_sec": 1000,
+		"web_token": "  tok  ",
+		"editor": {"command": " code ", "args": ["{file}", ""]}
+	}`)
+	if len(cfg.Hooks.PreTool) != 1 {
+		t.Fatalf("pre hooks = %+v", cfg.Hooks.PreTool)
+	}
+	pre := cfg.Hooks.PreTool[0]
+	if pre.Command != "gofmt -l ." || pre.TimeoutSec != 10 || len(pre.Tools) != 1 || pre.Tools[0] != "edit_file" {
+		t.Fatalf("pre hook = %+v", pre)
+	}
+	if len(cfg.Hooks.PostTool) != 1 || cfg.Hooks.PostTool[0].TimeoutSec != 300 {
+		t.Fatalf("post hooks = %+v", cfg.Hooks.PostTool)
+	}
+	if len(cfg.Diagnostics) != 1 || cfg.Diagnostics[0].Pattern != "*.go" || cfg.Diagnostics[0].Command != "go vet ./..." {
+		t.Fatalf("diagnostics = %+v", cfg.Diagnostics)
+	}
+	if cfg.DiagnosticTimeout != 600 {
+		t.Errorf("diagnostic timeout = %d", cfg.DiagnosticTimeout)
+	}
+	if cfg.WebToken != "tok" {
+		t.Errorf("web token = %q", cfg.WebToken)
+	}
+	if cfg.Editor == nil || cfg.Editor.Command != "code" || len(cfg.Editor.Args) != 1 || cfg.Editor.Args[0] != "{file}" {
+		t.Fatalf("editor = %+v", cfg.Editor)
+	}
+}
+
+func TestTier3EnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CODEAGENT_WEB_TOKEN", "env-token")
+	t.Setenv("CODEAGENT_WEB_INSECURE", "yes")
+	t.Setenv("CODEAGENT_DIAGNOSTIC_TIMEOUT", "45")
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WebToken != "env-token" || !cfg.WebInsecure || cfg.DiagnosticTimeout != 45 {
+		t.Fatalf("env overrides = %q / %v / %d", cfg.WebToken, cfg.WebInsecure, cfg.DiagnosticTimeout)
 	}
 }
 

@@ -18,15 +18,26 @@ import (
 type bashArgs struct {
 	Command    string `json:"command"`
 	TimeoutSec int    `json:"timeout_sec"`
+	Background bool   `json:"background"`
 }
 
-func (f *FS) runShell(ctx context.Context, shell string, raw json.RawMessage) (Result, error) {
+func (f *FS) runShell(ctx context.Context, shell string, bg BackgroundStarter, raw json.RawMessage) (Result, error) {
 	var a bashArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return Result{}, err
 	}
 	if strings.TrimSpace(a.Command) == "" {
 		return Result{}, errors.New("bash: command is required")
+	}
+	if a.Background {
+		if bg == nil {
+			return Result{}, errors.New("bash: background jobs are not available")
+		}
+		id, err := bg.Start(a.Command)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{Output: fmt.Sprintf("Started %s in the background: %s\nUse job_output to read its output and job_kill to stop it.", id, a.Command)}, nil
 	}
 	timeout := a.TimeoutSec
 	if timeout <= 0 {
@@ -79,6 +90,12 @@ func (f *FS) runShell(ctx context.Context, shell string, raw json.RawMessage) (R
 		fmt.Fprintf(&b, "[exit %d in %s]", exitCode, util.HumanDuration(elapsed))
 	}
 	return Result{Output: b.String(), IsError: exitCode != 0 || timedOut}, nil
+}
+
+// ShellCommand returns the executable and arguments needed to run command
+// through the configured shell.
+func ShellCommand(configured, command string) (string, []string) {
+	return shellFor(configured, command)
 }
 
 func shellFor(configured, command string) (string, []string) {

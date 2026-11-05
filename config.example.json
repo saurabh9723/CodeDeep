@@ -13,8 +13,26 @@
   "max_steps": 60,
   "allow_outside": false,
   "web_addr": "127.0.0.1:7777",
+  "web_token": "",
+  "web_insecure": false,
   "debug": false,
   "mcp_servers": {},
+  "hooks": {
+    "pre_tool": [
+      { "command": "gofmt -l .", "tools": ["write_file", "edit_file"], "timeout_sec": 10 }
+    ],
+    "post_tool": [
+      { "command": "echo hook-finished", "tools": ["bash"], "timeout_sec": 10 }
+    ]
+  },
+  "diagnostics": [
+    { "pattern": "*.go", "command": "go vet ./..." }
+  ],
+  "diagnostic_timeout_sec": 30,
+  "editor": {
+    "command": "code",
+    "args": ["-g", "{file}:{line}"]
+  },
   "permissions": [
     { "tool": "bash", "action": "allow", "command": "go test*" },
     { "tool": "bash", "action": "deny", "command": "rm -rf *" },

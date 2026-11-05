@@ -38,29 +38,64 @@ type PermissionRule struct {
 	Path    string `json:"path,omitempty"`
 }
 
+// Hook runs a shell command around a tool call. The hook receives a JSON
+// payload on stdin. Pre-tool hooks can block execution by exiting non-zero
+// when BlockOnFailure is set. Tools limits a hook to matching tool names.
+type Hook struct {
+	Command        string   `json:"command"`
+	TimeoutSec     int      `json:"timeout_sec,omitempty"`
+	Tools          []string `json:"tools,omitempty"`
+	BlockOnFailure bool     `json:"block_on_failure,omitempty"`
+}
+
+type Hooks struct {
+	PreTool  []Hook `json:"pre_tool,omitempty"`
+	PostTool []Hook `json:"post_tool,omitempty"`
+}
+
+// DiagnosticRule runs a command after a matching file is changed. The command
+// may use {file} (workspace-relative) and {abs} placeholders.
+type DiagnosticRule struct {
+	Pattern string `json:"pattern"`
+	Command string `json:"command"`
+}
+
+// Editor describes how to open a file in an external editor. File and Line
+// are replaced with the target path and line number in Args.
+type Editor struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+}
+
 type Config struct {
-	Provider         string               `json:"provider"`
-	APIKey           string               `json:"api_key"`
-	BaseURL          string               `json:"base_url"`
-	Model            string               `json:"model"`
-	MaxTokens        int                  `json:"max_tokens"`
-	Temperature      float64              `json:"temperature"`
-	ContextWindow    int                  `json:"context_window"`
-	CompactAt        float64              `json:"compact_at"`
-	Approval         string               `json:"approval"`
-	WorkDir          string               `json:"-"`
-	SessionsDir      string               `json:"sessions_dir"`
-	Shell            string               `json:"shell"`
-	MaxSteps         int                  `json:"max_steps"`
-	AllowOutside     bool                 `json:"allow_outside"`
-	WebAddr          string               `json:"web_addr"`
-	Debug            bool                 `json:"debug"`
-	MCPServers       map[string]MCPServer `json:"mcp_servers"`
-	InstructionFiles []string             `json:"instruction_files"`
-	Pricing          map[string]Price     `json:"pricing,omitempty"`
-	Permissions      []PermissionRule     `json:"permissions,omitempty"`
-	ConfigPath       string               `json:"-"`
-	Home             string               `json:"-"`
+	Provider          string               `json:"provider"`
+	APIKey            string               `json:"api_key"`
+	BaseURL           string               `json:"base_url"`
+	Model             string               `json:"model"`
+	MaxTokens         int                  `json:"max_tokens"`
+	Temperature       float64              `json:"temperature"`
+	ContextWindow     int                  `json:"context_window"`
+	CompactAt         float64              `json:"compact_at"`
+	Approval          string               `json:"approval"`
+	WorkDir           string               `json:"-"`
+	SessionsDir       string               `json:"sessions_dir"`
+	Shell             string               `json:"shell"`
+	MaxSteps          int                  `json:"max_steps"`
+	AllowOutside      bool                 `json:"allow_outside"`
+	WebAddr           string               `json:"web_addr"`
+	Debug             bool                 `json:"debug"`
+	MCPServers        map[string]MCPServer `json:"mcp_servers"`
+	InstructionFiles  []string             `json:"instruction_files"`
+	Pricing           map[string]Price     `json:"pricing,omitempty"`
+	Permissions       []PermissionRule     `json:"permissions,omitempty"`
+	Hooks             Hooks                `json:"hooks,omitempty"`
+	Diagnostics       []DiagnosticRule     `json:"diagnostics,omitempty"`
+	DiagnosticTimeout int                  `json:"diagnostic_timeout_sec,omitempty"`
+	WebToken          string               `json:"web_token,omitempty"`
+	WebInsecure       bool                 `json:"web_insecure,omitempty"`
+	Editor            *Editor              `json:"editor,omitempty"`
+	ConfigPath        string               `json:"-"`
+	Home              string               `json:"-"`
 
 	approvalMu sync.RWMutex
 }
@@ -263,6 +298,17 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("CODEAGENT_ALLOW_OUTSIDE"); v != "" {
 		c.AllowOutside = parseBool(v)
 	}
+	if v := os.Getenv("CODEAGENT_WEB_TOKEN"); v != "" {
+		c.WebToken = v
+	}
+	if v := os.Getenv("CODEAGENT_WEB_INSECURE"); v != "" {
+		c.WebInsecure = parseBool(v)
+	}
+	if v := os.Getenv("CODEAGENT_DIAGNOSTIC_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.DiagnosticTimeout = n
+		}
+	}
 }
 
 func parseBool(s string) bool {
@@ -331,6 +377,64 @@ func (c *Config) normalize() {
 		c.Permissions[i].Command = strings.TrimSpace(c.Permissions[i].Command)
 		c.Permissions[i].Path = strings.TrimSpace(c.Permissions[i].Path)
 	}
+	c.Hooks.PreTool = normalizeHooks(c.Hooks.PreTool)
+	c.Hooks.PostTool = normalizeHooks(c.Hooks.PostTool)
+	rules := c.Diagnostics[:0]
+	for _, rule := range c.Diagnostics {
+		rule.Pattern = strings.TrimSpace(rule.Pattern)
+		rule.Command = strings.TrimSpace(rule.Command)
+		if rule.Pattern == "" || rule.Command == "" {
+			continue
+		}
+		rules = append(rules, rule)
+	}
+	c.Diagnostics = rules
+	if c.DiagnosticTimeout <= 0 {
+		c.DiagnosticTimeout = 30
+	}
+	if c.DiagnosticTimeout > 600 {
+		c.DiagnosticTimeout = 600
+	}
+	c.WebToken = strings.TrimSpace(c.WebToken)
+	if c.Editor != nil {
+		c.Editor.Command = strings.TrimSpace(c.Editor.Command)
+		if c.Editor.Command == "" {
+			c.Editor = nil
+		} else {
+			args := c.Editor.Args[:0]
+			for _, arg := range c.Editor.Args {
+				if arg != "" {
+					args = append(args, arg)
+				}
+			}
+			c.Editor.Args = args
+		}
+	}
+}
+
+func normalizeHooks(in []Hook) []Hook {
+	out := in[:0]
+	for _, h := range in {
+		h.Command = strings.TrimSpace(h.Command)
+		if h.Command == "" {
+			continue
+		}
+		if h.TimeoutSec <= 0 {
+			h.TimeoutSec = 10
+		}
+		if h.TimeoutSec > 300 {
+			h.TimeoutSec = 300
+		}
+		tools := h.Tools[:0]
+		for _, name := range h.Tools {
+			if name = strings.TrimSpace(name); name != "" {
+				tools = append(tools, name)
+			}
+		}
+		h.Tools = tools
+		out = append(out, h)
+	}
+	return out
 }
 
 // SetProvider validates and selects a provider at runtime, applying the

@@ -29,6 +29,11 @@ type Change struct {
 }
 
 // Preview describes an upcoming mutation without applying it.
+// BackgroundStarter launches a shell command that outlives the tool call.
+type BackgroundStarter interface {
+	Start(command string) (string, error)
+}
+
 type Preview struct {
 	Path string
 	Diff string

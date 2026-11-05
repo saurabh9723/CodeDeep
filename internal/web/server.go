@@ -49,6 +49,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /static/", http.StripPrefix("/static/", files))
+	mux.HandleFunc("GET /login", s.handleLogin)
+	mux.HandleFunc("POST /login", s.handleLogin)
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
@@ -60,11 +62,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/compact", s.handleCompact)
 	mux.HandleFunc("GET /api/files", s.handleFiles)
 	mux.HandleFunc("GET /api/files/search", s.handleFileSearch)
+	mux.HandleFunc("GET /api/skills", s.handleSkills)
+	mux.HandleFunc("GET /api/skills/{name}", s.handleSkill)
+	mux.HandleFunc("POST /api/open", s.handleOpen)
 	mux.HandleFunc("POST /api/approve", s.handleApprove)
 	mux.HandleFunc("POST /api/undo", s.handleUndo)
 	mux.HandleFunc("POST /api/plan", s.handlePlan)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
-	return withHeaders(mux)
+	return withHeaders(withAuth(mux, s.App.Cfg.WebToken))
 }
 
 func withHeaders(next http.Handler) http.Handler {
@@ -100,6 +105,13 @@ type toolInfo struct {
 	ReadOnly    bool   `json:"read_only"`
 }
 
+type skillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Path        string `json:"path"`
+	Body        string `json:"body,omitempty"`
+}
+
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	metas, err := s.App.Sessions.List()
 	if err != nil {
@@ -114,6 +126,10 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tools {
 		infos = append(infos, toolInfo{Name: t.Name, Description: t.Description, ReadOnly: t.ReadOnly})
 	}
+	skillInfos := make([]skillInfo, 0, s.App.Skills.Len())
+	for _, sk := range s.App.Skills.List() {
+		skillInfos = append(skillInfos, skillInfo{Name: sk.Name, Description: sk.Description, Path: sk.Path})
+	}
 	approval := s.App.Cfg.ApprovalMode()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"model":           s.App.Cfg.Model,
@@ -123,6 +139,10 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"approval":        approval,
 		"api_key_present": s.App.Cfg.APIKeyPresent(),
 		"tools":           infos,
+		"skills":          skillInfos,
+		"hooks":           len(s.App.Cfg.Hooks.PreTool) + len(s.App.Cfg.Hooks.PostTool),
+		"diagnostics":     len(s.App.Cfg.Diagnostics),
+		"editor":          s.App.Cfg.Editor != nil,
 		"sessions":        metas,
 		"mcp_servers":     s.App.MCPCount(),
 		"version":         "0.1.0",
@@ -130,6 +150,29 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"context_window":  s.App.Cfg.ContextWindow,
 		"plan":            approval == "plan",
 		"pricing":         s.App.Cfg.Pricing,
+	})
+}
+
+func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	list := s.App.Skills.List()
+	out := make([]skillInfo, 0, len(list))
+	for _, sk := range list {
+		out = append(out, skillInfo{Name: sk.Name, Description: sk.Description, Path: sk.Path})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleSkill(w http.ResponseWriter, r *http.Request) {
+	sk, ok := s.App.Skills.Get(r.PathValue("name"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "skill not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, skillInfo{
+		Name:        sk.Name,
+		Description: sk.Description,
+		Path:        sk.Path,
+		Body:        sk.Body,
 	})
 }
 

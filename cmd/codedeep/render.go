@@ -242,6 +242,39 @@ func (r *renderer) Emit(ev agent.Event) {
 		}
 		r.atLineStart = true
 
+	case agent.EventHook:
+		if ev.IsError || r.debug {
+			r.ensureNL()
+			r.inReasoning = false
+			label := fmt.Sprintf("%s %s", ev.Name, ev.Message)
+			if ev.IsError {
+				fmt.Fprintf(r.out, "%s%s %s\n", r.depthPrefix(ev.Depth), r.p.red("hook failed"), r.p.dim(label))
+				r.stream(util.TruncateMiddle(ev.Output, 2000), r.depthPrefix(ev.Depth)+"  ", r.p.dim)
+				r.ensureNL()
+			} else {
+				fmt.Fprintf(r.out, "%s%s %s\n", r.depthPrefix(ev.Depth), r.p.dim("hook"), r.p.dim(label))
+			}
+		}
+
+	case agent.EventDiagnostics:
+		if ev.IsError || r.debug {
+			r.ensureNL()
+			r.inReasoning = false
+			label := ev.Message
+			if label == "" {
+				label = ev.Name
+			}
+			status := r.p.green("ok")
+			if ev.IsError {
+				status = r.p.red("failed")
+			}
+			fmt.Fprintf(r.out, "%s%s %s %s\n", r.depthPrefix(ev.Depth), r.p.cyan("diagnostics"), status, r.p.dim(label))
+			if ev.IsError && strings.TrimSpace(ev.Output) != "" {
+				r.stream(util.TruncateMiddle(ev.Output, 2000), r.depthPrefix(ev.Depth)+"  ", r.p.dim)
+				r.ensureNL()
+			}
+		}
+
 	case agent.EventApprovalResult:
 		if ev.IsError {
 			r.ensureNL()

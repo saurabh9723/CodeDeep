@@ -20,6 +20,8 @@ const (
 	EventCompact        = "compact"
 	EventSubagentStart  = "subagent_start"
 	EventSubagentEnd    = "subagent_end"
+	EventHook           = "hook"
+	EventDiagnostics    = "diagnostics"
 	EventDone           = "done"
 	EventError          = "error"
 )

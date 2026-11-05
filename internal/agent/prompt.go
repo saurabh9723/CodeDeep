@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"codedeep/internal/config"
+	"codedeep/internal/skills"
 	"codedeep/internal/tools"
 )
 
-// BuildSystemPrompt assembles the agent identity, environment, rules, and
-// project instructions.
-func BuildSystemPrompt(cfg *config.Config, depth int) string {
+// BuildSystemPrompt assembles the agent identity, environment, rules, skills,
+// and project instructions.
+func BuildSystemPrompt(cfg *config.Config, depth int, catalog *skills.Catalog) string {
 	var b strings.Builder
 	if depth == 0 {
 		b.WriteString("You are CodeDeep, a command-line coding agent working directly in the user's workspace.\n")
@@ -54,6 +55,9 @@ func BuildSystemPrompt(cfg *config.Config, depth int) string {
 - The user can see tool calls and their output, so do not paste large outputs back into your reply.
 - End with a short summary: what changed, where, and how it was verified.
 `)
+	if section := catalog.Section(); section != "" {
+		b.WriteString(section)
+	}
 	if approval == "plan" {
 		b.WriteString(`
 # Plan mode

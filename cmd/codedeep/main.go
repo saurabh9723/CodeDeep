@@ -19,8 +19,10 @@ import (
 	"codedeep/internal/app"
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
+	"codedeep/internal/jobs"
 	"codedeep/internal/llm"
 	"codedeep/internal/session"
+	"codedeep/internal/skills"
 	"codedeep/internal/tools"
 	"codedeep/internal/util"
 )
@@ -40,6 +42,8 @@ func dispatch(args []string) int {
 			return cmdDoctor(args[1:])
 		case "sessions":
 			return cmdSessions(args[1:])
+		case "open":
+			return cmdOpen(args[1:])
 		case "version", "--version", "-version", "-v":
 			fmt.Println(versionString())
 			return 0
@@ -70,6 +74,7 @@ Usage:
   codedeep sessions            list saved sessions
   codedeep sessions -q parser  search titles and transcripts
   codedeep sessions -export ID export a session as markdown or JSON
+  codedeep open src/main.go:42 open a file in your editor
   codedeep version             print version information
 
 Common flags:
@@ -469,8 +474,37 @@ func cmdDoctor(args []string) int {
 
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	reg := tools.NewRegistry()
-	tools.RegisterCore(reg, fsys, cfg.Shell)
+	manager := jobs.NewManager(cfg.Shell, cfg.WorkDir)
+	tools.RegisterCoreWithJobs(reg, fsys, cfg.Shell, manager)
+	jobs.RegisterTools(reg, manager)
+	catalog := skills.Discover(cfg.WorkDir, cfg.Home)
+	catalog.RegisterTools(reg)
 	fmt.Printf("tools          %d built-in\n", len(reg.List()))
+
+	skillNames := make([]string, 0, catalog.Len())
+	for _, skill := range catalog.List() {
+		skillNames = append(skillNames, skill.Name)
+	}
+	if len(skillNames) == 0 {
+		fmt.Println("skills         none")
+	} else {
+		fmt.Printf("skills         %d: %s\n", len(skillNames), strings.Join(skillNames, ", "))
+	}
+	fmt.Printf("hooks          %d pre · %d post\n", len(cfg.Hooks.PreTool), len(cfg.Hooks.PostTool))
+	fmt.Printf("diagnostics    %d rules\n", len(cfg.Diagnostics))
+	editor := "auto ($VISUAL/$EDITOR/code)"
+	if cfg.Editor != nil {
+		editor = cfg.Editor.Command
+	}
+	fmt.Printf("editor         %s\n", editor)
+	switch {
+	case cfg.WebToken != "":
+		fmt.Printf("web auth       token required\n")
+	case cfg.WebInsecure:
+		fmt.Printf("web auth       disabled (web_insecure)\n")
+	default:
+		fmt.Printf("web auth       loopback only\n")
+	}
 
 	if len(cfg.MCPServers) == 0 {
 		fmt.Println("mcp servers    none")

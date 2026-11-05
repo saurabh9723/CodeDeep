@@ -50,6 +50,12 @@ func cmdServe(args []string) int {
 	if strings.TrimSpace(addr) != "" {
 		cfg.WebAddr = addr
 	}
+	if !bindIsLoopback(cfg.WebAddr) && cfg.WebToken == "" && !cfg.WebInsecure {
+		fmt.Fprintf(os.Stderr, "codedeep: refusing to listen on %s without authentication\n", cfg.WebAddr)
+		fmt.Fprintln(os.Stderr, "  set CODEAGENT_WEB_TOKEN (or web_token in the config) to require a token,")
+		fmt.Fprintln(os.Stderr, "  or set web_insecure=true if you deliberately want an open server")
+		return 1
+	}
 
 	if len(cfg.MCPServers) > 0 {
 		fmt.Fprintln(os.Stderr, "starting MCP servers…")
@@ -88,6 +94,9 @@ func cmdServe(args []string) int {
 	fmt.Printf("  CodeDeep web UI\n")
 	fmt.Printf("  %s\n", url)
 	fmt.Printf("  %s\n", styleDim(fmt.Sprintf("%s · %s · approval %s", cfg.Model, cfg.WorkDir, cfg.Approval)))
+	if cfg.WebToken != "" {
+		fmt.Printf("  %s\n", styleYellow("token required — open the URL and sign in"))
+	}
 	if !cfg.APIKeyPresent() {
 		fmt.Printf("  %s\n", styleYellow("no API key configured — the UI will show setup instructions"))
 	}
@@ -114,6 +123,24 @@ func cmdServe(args []string) int {
 	}
 	fmt.Println("stopped")
 	return 0
+}
+
+// bindIsLoopback reports whether addr only accepts local connections. An empty
+// host means all interfaces, which is not loopback.
+func bindIsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func displayURL(addr net.Addr) string {

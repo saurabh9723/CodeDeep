@@ -456,18 +456,27 @@ async function send() {
     return;
   }
 
+  input.value = '';
+  resizeInput();
+  await startChat(text, images, text);
+}
+
+async function startChat(text, images, displayText) {
+  if (state.running) return;
+  if (!state.keyPresent) {
+    toast('Set DEEPSEEK_API_KEY and restart the server to start chatting.', 5000);
+    return;
+  }
   hideEmpty();
   const turn = newTurn();
   state.turn = turn;
-  addUserMessage(text, turn, images);
+  addUserMessage(displayText === undefined ? text : displayText, turn, images);
   state.assistant = createAssistant();
   state.assistantFresh = true;
   state.toolCards.clear();
   state.approvals.clear();
   state.subagents = [];
 
-  input.value = '';
-  resizeInput();
   state.abort = new AbortController();
   setRunning(true, 'thinking');
 
@@ -478,6 +487,10 @@ async function send() {
       body: JSON.stringify({ session_id: state.sessionId || '', prompt: text, images }),
       signal: state.abort.signal,
     });
+    if (res.status === 401) {
+      location.assign('/login');
+      return;
+    }
     if (!res.ok) {
       let message = 'HTTP ' + res.status;
       try {
@@ -615,6 +628,22 @@ function renderFileEntries(entries, searching) {
       el('span', 'palette-name', entry.name)
     );
     if (entry.dir && !searching) row.append(el('span', 'palette-desc', 'dir'));
+    else {
+      const open = el('span', 'palette-open', '↗');
+      open.title = 'Open in editor';
+      open.setAttribute('role', 'button');
+      open.setAttribute('tabindex', '0');
+      const launch = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openInEditor(entry.path);
+      };
+      open.addEventListener('click', launch);
+      open.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') launch(e);
+      });
+      row.append(open);
+    }
     row.addEventListener('click', () => {
       if (entry.dir && !searching) loadFiles(entry.path);
       else insertFileMention(entry.path);
@@ -652,6 +681,9 @@ const slashCommands = [
   { name: '/new', desc: 'Start a new session', run: () => newChat() },
   { name: '/plan', desc: 'Toggle plan mode', run: () => togglePlan() },
   { name: '/undo', desc: 'Revert the last turn', run: () => undoLastTurn() },
+  { name: '/skills', desc: 'List workspace skills', run: () => showSkills() },
+  { name: '/skill', desc: 'Run a skill: /skill name task', run: () => toast('Usage: /skill <name> [task]') },
+  { name: '/open', desc: 'Open a file in your editor', run: () => toast('Usage: /open <path>[:line]') },
   { name: '/export md', desc: 'Export as Markdown', run: () => exportSession('md') },
   { name: '/export json', desc: 'Export as JSON', run: () => exportSession('json') },
   { name: '/sessions', desc: 'Search sessions', run: () => $('#sessionSearch').focus() },
@@ -732,11 +764,92 @@ async function runSlashCommand(text) {
     case '/sessions':
       $('#sessionSearch').focus();
       return;
+    case '/skills':
+      return showSkills();
+    case '/skill': {
+      const name = parts[1];
+      if (!name) {
+        toast('Usage: /skill <name> [task]');
+        return;
+      }
+      const task = text.trim().replace(/^\/skill\s+\S+\s*/i, '').trim();
+      return runSkill(name, task);
+    }
+    case '/open': {
+      const ref = text.trim().replace(/^\/open\s*/i, '').trim();
+      if (!ref) {
+        toast('Usage: /open <path>[:line]');
+        return;
+      }
+      return openInEditor(ref);
+    }
     case '/help':
-      toast('Slash commands: /compact, /new, /plan, /undo, /export md|json, /sessions, /help', 6000);
+      toast(
+        'Slash commands: /compact, /new, /plan, /undo, /skills, /skill, /open, /export md|json, /sessions, /help',
+        6000
+      );
       return;
     default:
       toast('Unknown command ' + parts[0] + '. Type / to browse commands.');
+  }
+}
+
+async function showSkills() {
+  try {
+    const list = await api('/api/skills');
+    if (!list || !list.length) {
+      addNote('No skills found. Add markdown files to .codedeep/skills or ~/.codedeep/skills.');
+      return;
+    }
+    const card = el('div', 'note-card');
+    card.append(el('div', '', `Workspace skills (${list.length}):`));
+    for (const skill of list) {
+      const line = el('div', 'skill-line');
+      line.append(
+        el('span', 'skill-name', '/' + skill.name + (skill.description ? ' — ' + skill.description : '')),
+        el('span', 'skill-path', compactPath(skill.path || ''))
+      );
+      card.append(line);
+    }
+    (state.turn || newTurn()).append(card);
+    scrollSoon();
+  } catch (err) {
+    toast('Could not list skills: ' + err.message);
+  }
+}
+
+async function runSkill(name, task) {
+  try {
+    const skill = await api('/api/skills/' + encodeURIComponent(name));
+    if (!task) {
+      const details = document.createElement('details');
+      details.className = 'summary-card';
+      const summary = document.createElement('summary');
+      summary.textContent = `Skill: ${skill.name}`;
+      const body = el('pre', '', skill.body || '(empty skill)');
+      details.append(summary, body);
+      details.open = true;
+      (state.turn || newTurn()).append(details);
+      scrollSoon();
+      return;
+    }
+    let prompt = `Use the skill "${skill.name}".\n\n${skill.body || ''}`;
+    if (task) prompt += `\n\n# Task\n${task}`;
+    await startChat(prompt, [], `/skill ${skill.name} ${task}`);
+  } catch (err) {
+    toast('Could not load skill: ' + err.message, 5000);
+  }
+}
+
+async function openInEditor(ref, line) {
+  try {
+    const res = await api('/api/open', {
+      method: 'POST',
+      body: JSON.stringify({ path: ref, line: line || 0 }),
+    });
+    toast('Opened ' + compactPath(res.opened || ref));
+  } catch (err) {
+    toast('Could not open editor: ' + err.message, 5000);
   }
 }
 
@@ -851,6 +964,18 @@ function handleEvent(ev) {
       break;
     case 'compact':
       addNote(ev.message || 'Context compacted');
+      break;
+    case 'hook':
+      if (ev.is_error) {
+        const where = ev.name ? ev.name + '-tool hook' : 'hook';
+        addNote(`${where} failed for ${ev.message || 'a tool'}: ${truncate(ev.output || '', 600)}`, 'warn');
+      }
+      break;
+    case 'diagnostics':
+      if (ev.is_error) {
+        const target = ev.path || ev.name || 'changed file';
+        addNote(`Diagnostics failed for ${target}: ${truncate(ev.output || '', 600)}`, 'warn');
+      }
       break;
     case 'error':
       if (ev.message && ev.message !== 'context canceled') addErrorCard(ev.message);
@@ -1797,6 +1922,10 @@ function relTime(iso) {
 async function api(path, opts = {}) {
   const options = { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) } };
   const res = await fetch(path, options);
+  if (res.status === 401) {
+    location.assign('/login');
+    throw new Error('authentication required');
+  }
   if (!res.ok) {
     let message = res.statusText || 'HTTP ' + res.status;
     try {

@@ -66,8 +66,9 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 		Session:    a.session,
 		Checkpoint: a.checkpoint,
 		Approval:   a.approval,
+		Skills:     a.skills,
 	})
-	system := BuildSystemPrompt(a.cfg, depth)
+	system := BuildSystemPrompt(a.cfg, depth, a.skills)
 	msgs := []llm.Message{{Role: "user", Content: args.Prompt}}
 
 	maxSteps := 30
