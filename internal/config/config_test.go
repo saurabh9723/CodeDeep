@@ -18,6 +18,7 @@ var configEnvVars = []string{
 	"CODEAGENT_MODEL", "DEEPSEEK_MODEL",
 	"CODEAGENT_MAX_TOKENS", "CODEAGENT_TEMPERATURE", "CODEAGENT_CONTEXT_WINDOW",
 	"CODEAGENT_REASONING_EFFORT", "CODEAGENT_REASONING_BUDGET",
+	"CODEAGENT_PROMPT_CACHE",
 	"CODEAGENT_COMPACT_AT", "CODEAGENT_APPROVAL", "CODEAGENT_SESSIONS_DIR",
 	"CODEAGENT_SHELL", "CODEAGENT_MAX_STEPS", "CODEAGENT_WEB_ADDR",
 	"CODEAGENT_DEBUG", "CODEAGENT_ALLOW_OUTSIDE",
@@ -62,6 +63,9 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.MaxTokens != 8192 || cfg.Temperature != 0.3 {
 		t.Errorf("model defaults = %d / %v", cfg.MaxTokens, cfg.Temperature)
+	}
+	if !cfg.PromptCache {
+		t.Error("prompt caching should default to on")
 	}
 	if cfg.MCPServers == nil {
 		t.Error("MCPServers should be non-nil")
@@ -231,6 +235,54 @@ func TestReasoningEnvOverrides(t *testing.T) {
 	}
 	if cfg.ReasoningEffort != "medium" || cfg.ReasoningBudget != 12000 {
 		t.Errorf("reasoning env = %q / %d", cfg.ReasoningEffort, cfg.ReasoningBudget)
+	}
+}
+
+func TestPromptCacheToggle(t *testing.T) {
+	cfg := loadFrom(t, `{"prompt_cache": false}`)
+	if cfg.PromptCache {
+		t.Error("explicit prompt_cache=false should be honored")
+	}
+
+	clearConfigEnv(t)
+	t.Setenv("CODEAGENT_PROMPT_CACHE", "yes")
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"prompt_cache": false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.PromptCache {
+		t.Error("CODEAGENT_PROMPT_CACHE should re-enable caching")
+	}
+}
+
+func TestUsageCostCacheWrite(t *testing.T) {
+	cfg := &Config{
+		Model: "m",
+		Pricing: map[string]Price{
+			"m": {InputPerMTok: 2, OutputPerMTok: 8, CacheHitPerMTok: 0.5, CacheWritePerMTok: 2.5},
+		},
+	}
+	cost, _ := cfg.UsageCost(llm.Usage{
+		PromptTokens:           1_000_000,
+		PromptCacheHitTokens:   400_000,
+		PromptCacheWriteTokens: 200_000,
+	})
+	if math.Abs(cost-1.5) > 1e-9 {
+		t.Errorf("cost = %v, want 1.5", cost)
+	}
+
+	// Without a cache-write price, writes are billed at the input rate.
+	cfg.Pricing["m"] = Price{InputPerMTok: 2, OutputPerMTok: 8}
+	cost, _ = cfg.UsageCost(llm.Usage{
+		PromptTokens:           1_000_000,
+		PromptCacheWriteTokens: 200_000,
+	})
+	if math.Abs(cost-2) > 1e-9 {
+		t.Errorf("cost without cache-write price = %v, want 2", cost)
 	}
 }
 

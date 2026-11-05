@@ -433,6 +433,18 @@ func reasoningSummary(cfg *config.Config) string {
 	return strings.Join(parts, " · ")
 }
 
+func cacheSummary(cfg *config.Config) string {
+	if !cfg.PromptCache {
+		return "off"
+	}
+	switch cfg.Provider {
+	case "anthropic":
+		return "on (cache_control breakpoints)"
+	default:
+		return "on (automatic)"
+	}
+}
+
 func maskKey(key string) string {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -486,6 +498,7 @@ func cmdDoctor(args []string) int {
 	fmt.Printf("context        %d tokens (compact at %.0f%%)\n", cfg.ContextWindow, cfg.CompactAt*100)
 	fmt.Printf("max steps      %d\n", cfg.MaxSteps)
 	fmt.Printf("reasoning      %s\n", reasoningSummary(cfg))
+	fmt.Printf("prompt cache   %s\n", cacheSummary(cfg))
 
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	reg := tools.NewRegistry()

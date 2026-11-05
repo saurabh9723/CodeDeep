@@ -386,3 +386,108 @@ func TestRunWithImagesAllowsImageOnlyPrompt(t *testing.T) {
 		t.Fatalf("unexpected first message: %#v", sess.Messages)
 	}
 }
+
+func TestSubagentsRunInParallel(t *testing.T) {
+	var started atomic.Int32
+	release := make(chan struct{})
+	var probesMu sync.Mutex
+	var probes []string
+	reg := tools.NewRegistry()
+	reg.Register(&tools.Spec{
+		Name:        "sync_probe",
+		Description: "Read-only probe that blocks until two are running.",
+		Params:      tools.Object(map[string]any{}),
+		ReadOnly:    true,
+		Run: func(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
+			if started.Add(1) == 2 {
+				close(release)
+			}
+			select {
+			case <-release:
+				probesMu.Lock()
+				probes = append(probes, "probe ok")
+				probesMu.Unlock()
+				return tools.Result{Output: "probe ok"}, nil
+			case <-time.After(2500 * time.Millisecond):
+				probesMu.Lock()
+				probes = append(probes, "probe timed out")
+				probesMu.Unlock()
+				return tools.Result{Output: "probe timed out", IsError: true}, nil
+			case <-ctx.Done():
+				return tools.Result{}, ctx.Err()
+			}
+		},
+	})
+
+	// Request map: 1 = parent spawns two subagents; 2,3 = each subagent's
+	// probe turn (both must start before either can finish, so their numbers
+	// are stable); 4,5 = subagent final turns; 6 = parent final turn.
+	client, _ := newFakeLLM(t, func(n int, w http.ResponseWriter) {
+		switch n {
+		case 1:
+			streamToolCalls(w, []toolCallSpec{
+				{id: "sub_a", name: "agent", args: `{"description":"probe a","prompt":"run the sync probe"}`},
+				{id: "sub_b", name: "agent", args: `{"description":"probe b","prompt":"run the sync probe"}`},
+			})
+		case 2, 3:
+			streamToolCalls(w, []toolCallSpec{{id: "probe_1", name: "sync_probe", args: `{}`}})
+		case 4, 5:
+			streamText(w, "probe finished", 8, 2)
+		default:
+			streamText(w, "Both subagents finished.", 20, 5)
+		}
+	})
+
+	cfg := testConfig(t)
+	var events []Event
+	a := newAgentWith(t, cfg, client, reg, nil, &events)
+	sess := a.sessions.New(cfg.Model, cfg.WorkDir)
+
+	done := make(chan error, 1)
+	go func() { done <- a.Run(context.Background(), sess, "spawn two subagents") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run stalled")
+	}
+
+	// The probes only succeed when both subagents are executing at the same
+	// time; a sequential run leaves a timeout behind.
+	probesMu.Lock()
+	results := append([]string(nil), probes...)
+	probesMu.Unlock()
+	if len(results) != 2 {
+		t.Fatalf("probe runs = %d, want 2", len(results))
+	}
+	for _, r := range results {
+		if r != "probe ok" {
+			t.Errorf("subagents ran sequentially: probe result %q", r)
+		}
+	}
+	subReports, starts, ends := 0, 0, 0
+	for _, m := range sess.Messages {
+		if m.Role == "tool" && m.Content == "probe finished" {
+			subReports++
+		}
+	}
+	for _, ev := range events {
+		switch ev.Type {
+		case EventSubagentStart:
+			if ev.Depth != 1 {
+				t.Errorf("subagent start depth = %d, want 1", ev.Depth)
+			}
+			starts++
+		case EventSubagentEnd:
+			ends++
+		}
+	}
+	if subReports != 2 {
+		t.Errorf("subagent reports = %d, want 2", subReports)
+	}
+	if starts != 2 || ends != 2 {
+		t.Errorf("subagent events = %d start, %d end, want 2/2", starts, ends)
+	}
+}

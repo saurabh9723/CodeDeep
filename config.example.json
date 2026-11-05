@@ -7,6 +7,7 @@
   "temperature": 0.3,
   "reasoning_effort": "",
   "reasoning_budget_tokens": 0,
+  "prompt_cache": true,
   "context_window": 128000,
   "compact_at": 0.8,
   "approval": "ask",

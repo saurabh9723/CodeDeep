@@ -38,10 +38,24 @@ type anthropicRequest struct {
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature *float64           `json:"temperature,omitempty"`
 	Thinking    *anthropicThinking `json:"thinking,omitempty"`
-	System      string             `json:"system,omitempty"`
+	System      any                `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Tools       []anthropicTool    `json:"tools,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
+}
+
+// anthropicCacheControl marks a prompt prefix for Anthropic's prompt cache.
+// Anthropic allows up to four breakpoints per request.
+type anthropicCacheControl struct {
+	Type string `json:"type"`
+}
+
+var ephemeralCache = &anthropicCacheControl{Type: "ephemeral"}
+
+type anthropicSystemBlock struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicThinking struct {
@@ -55,16 +69,17 @@ type anthropicMessage struct {
 }
 
 type anthropicBlock struct {
-	Type      string                `json:"type"`
-	Text      string                `json:"text,omitempty"`
-	Thinking  string                `json:"thinking,omitempty"`
-	Signature string                `json:"signature,omitempty"`
-	ID        string                `json:"id,omitempty"`
-	Name      string                `json:"name,omitempty"`
-	Input     json.RawMessage       `json:"input,omitempty"`
-	ToolUseID string                `json:"tool_use_id,omitempty"`
-	Content   string                `json:"content,omitempty"`
-	Source    *anthropicImageSource `json:"source,omitempty"`
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text,omitempty"`
+	Thinking     string                 `json:"thinking,omitempty"`
+	Signature    string                 `json:"signature,omitempty"`
+	ID           string                 `json:"id,omitempty"`
+	Name         string                 `json:"name,omitempty"`
+	Input        json.RawMessage        `json:"input,omitempty"`
+	ToolUseID    string                 `json:"tool_use_id,omitempty"`
+	Content      string                 `json:"content,omitempty"`
+	Source       *anthropicImageSource  `json:"source,omitempty"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicImageSource struct {
@@ -74,9 +89,10 @@ type anthropicImageSource struct {
 }
 
 type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description,omitempty"`
+	InputSchema  json.RawMessage        `json:"input_schema"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 func (c *AnthropicClient) buildBody(req ChatRequest, stream bool) ([]byte, error) {
@@ -101,7 +117,14 @@ func (c *AnthropicClient) buildBody(req ChatRequest, stream bool) ([]byte, error
 			system = append(system, m.Content)
 		}
 	}
-	body.System = strings.Join(system, "\n\n")
+	systemText := strings.Join(system, "\n\n")
+	if systemText != "" {
+		if req.PromptCache {
+			body.System = []anthropicSystemBlock{{Type: "text", Text: systemText, CacheControl: ephemeralCache}}
+		} else {
+			body.System = systemText
+		}
+	}
 
 	for _, m := range req.Messages {
 		var role string
@@ -163,6 +186,19 @@ func (c *AnthropicClient) buildBody(req ChatRequest, stream bool) ([]byte, error
 			InputSchema: t.Function.Parameters,
 		})
 	}
+	if req.PromptCache {
+		// Cache the tool and system prefixes once, then move the final
+		// breakpoint with the conversation so each turn reuses the last one.
+		if n := len(body.Tools); n > 0 {
+			body.Tools[n-1].CacheControl = ephemeralCache
+		}
+		if n := len(body.Messages); n > 0 {
+			if blocks, ok := body.Messages[n-1].Content.([]anthropicBlock); ok && len(blocks) > 0 {
+				blocks[len(blocks)-1].CacheControl = ephemeralCache
+				body.Messages[n-1].Content = blocks
+			}
+		}
+	}
 	return json.Marshal(body)
 }
 
@@ -207,9 +243,10 @@ type anthropicStreamEvent struct {
 	Index   int    `json:"index"`
 	Message *struct {
 		Usage struct {
-			InputTokens          int `json:"input_tokens"`
-			OutputTokens         int `json:"output_tokens"`
-			CacheReadInputTokens int `json:"cache_read_input_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 	ContentBlock *anthropicBlock `json:"content_block"`
@@ -288,8 +325,9 @@ func (c *AnthropicClient) parseStream(ctx context.Context, body io.ReadCloser, o
 		case "message_start":
 			if ev.Message != nil {
 				u := ev.Message.Usage
-				resp.Usage.PromptTokens = u.InputTokens
+				resp.Usage.PromptTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 				resp.Usage.PromptCacheHitTokens = u.CacheReadInputTokens
+				resp.Usage.PromptCacheWriteTokens = u.CacheCreationInputTokens
 			}
 		case "content_block_start":
 			if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
@@ -435,9 +473,10 @@ func (c *AnthropicClient) Complete(ctx context.Context, req ChatRequest) (*Respo
 			Content    []anthropicBlock `json:"content"`
 			StopReason string           `json:"stop_reason"`
 			Usage      struct {
-				InputTokens          int `json:"input_tokens"`
-				OutputTokens         int `json:"output_tokens"`
-				CacheReadInputTokens int `json:"cache_read_input_tokens"`
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 			Error *struct {
 				Type    string `json:"type"`
@@ -478,11 +517,13 @@ func (c *AnthropicClient) Complete(ctx context.Context, req ChatRequest) (*Respo
 		resp.Message.Content = text.String()
 		resp.Message.Reasoning = reasoning.String()
 		resp.Message.ReasoningSignature = signature.String()
+		promptTokens := out.Usage.InputTokens + out.Usage.CacheReadInputTokens + out.Usage.CacheCreationInputTokens
 		resp.Usage = Usage{
-			PromptTokens:         out.Usage.InputTokens,
-			CompletionTokens:     out.Usage.OutputTokens,
-			TotalTokens:          out.Usage.InputTokens + out.Usage.OutputTokens,
-			PromptCacheHitTokens: out.Usage.CacheReadInputTokens,
+			PromptTokens:           promptTokens,
+			CompletionTokens:       out.Usage.OutputTokens,
+			TotalTokens:            promptTokens + out.Usage.OutputTokens,
+			PromptCacheHitTokens:   out.Usage.CacheReadInputTokens,
+			PromptCacheWriteTokens: out.Usage.CacheCreationInputTokens,
 		}
 		return resp, nil
 	}

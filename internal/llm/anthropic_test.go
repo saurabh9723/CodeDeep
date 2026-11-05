@@ -83,7 +83,7 @@ func TestAnthropicStreamTextAndToolUse(t *testing.T) {
 	if resp.FinishReason != "tool_calls" {
 		t.Errorf("finish reason = %q", resp.FinishReason)
 	}
-	if resp.Usage.PromptTokens != 11 || resp.Usage.CompletionTokens != 7 || resp.Usage.TotalTokens != 18 || resp.Usage.PromptCacheHitTokens != 3 {
+	if resp.Usage.PromptTokens != 14 || resp.Usage.CompletionTokens != 7 || resp.Usage.TotalTokens != 21 || resp.Usage.PromptCacheHitTokens != 3 {
 		t.Errorf("usage = %#v", resp.Usage)
 	}
 
@@ -128,7 +128,7 @@ func TestAnthropicCompleteParsesBlocksAndUsage(t *testing.T) {
 				{"type":"tool_use","id":"toolu_9","name":"bash","input":{"command":"ls"}}
 			],
 			"stop_reason":"tool_use",
-			"usage":{"input_tokens":5,"output_tokens":3,"cache_read_input_tokens":2}
+			"usage":{"input_tokens":5,"output_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":4}
 		}`)
 	}))
 	defer srv.Close()
@@ -146,11 +146,83 @@ func TestAnthropicCompleteParsesBlocksAndUsage(t *testing.T) {
 	if resp.Message.ToolCalls[0].Function.Arguments != `{"command":"ls"}` {
 		t.Errorf("tool args = %q", resp.Message.ToolCalls[0].Function.Arguments)
 	}
-	if resp.Usage.PromptTokens != 5 || resp.Usage.CompletionTokens != 3 || resp.Usage.TotalTokens != 8 {
+	if resp.Usage.PromptTokens != 11 || resp.Usage.CompletionTokens != 3 || resp.Usage.TotalTokens != 14 {
 		t.Errorf("usage = %#v", resp.Usage)
+	}
+	if resp.Usage.PromptCacheHitTokens != 2 || resp.Usage.PromptCacheWriteTokens != 4 {
+		t.Errorf("cache usage = %#v", resp.Usage)
 	}
 	if resp.FinishReason != "tool_calls" {
 		t.Errorf("finish = %q", resp.FinishReason)
+	}
+}
+
+func TestAnthropicPromptCacheBreakpoints(t *testing.T) {
+	c := NewAnthropicClient("", "k")
+	payload, err := c.buildBody(ChatRequest{
+		Model:       "claude-test",
+		PromptCache: true,
+		Messages: []Message{
+			{Role: "system", Content: "be brief"},
+			{Role: "user", Content: "run it"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "t1", Type: "function", Function: FunctionCall{Name: "bash", Arguments: `{"command":"ls"}`}}}},
+			{Role: "tool", ToolCallID: "t1", Content: "a.txt"},
+		},
+		Tools: []Tool{
+			{Type: "function", Function: FunctionDef{Name: "read_file", Description: "Read", Parameters: json.RawMessage(`{"type":"object"}`)}},
+			{Type: "function", Function: FunctionDef{Name: "bash", Description: "Run", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var body struct {
+		System   []anthropicSystemBlock `json:"system"`
+		Messages []struct {
+			Role    string           `json:"role"`
+			Content []anthropicBlock `json:"content"`
+		} `json:"messages"`
+		Tools []anthropicTool `json:"tools"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.System) != 1 || body.System[0].Text != "be brief" || body.System[0].CacheControl == nil {
+		t.Fatalf("system = %#v", body.System)
+	}
+	if len(body.Tools) != 2 || body.Tools[0].CacheControl != nil || body.Tools[1].CacheControl == nil {
+		t.Fatalf("tools = %#v", body.Tools)
+	}
+	if len(body.Messages) != 3 {
+		t.Fatalf("messages = %#v", body.Messages)
+	}
+	if len(body.Messages[0].Content) != 1 || body.Messages[0].Content[0].CacheControl != nil {
+		t.Errorf("earlier message should not carry a breakpoint: %#v", body.Messages[0].Content)
+	}
+	lastBlocks := body.Messages[len(body.Messages)-1].Content
+	if len(lastBlocks) == 0 || lastBlocks[len(lastBlocks)-1].CacheControl == nil {
+		t.Errorf("last message should end with a breakpoint: %#v", lastBlocks)
+	}
+}
+
+func TestAnthropicPromptCacheDisabledSendsPlainSystem(t *testing.T) {
+	c := NewAnthropicClient("", "k")
+	payload, err := c.buildBody(ChatRequest{
+		Model:    "claude-test",
+		Messages: []Message{{Role: "system", Content: "be brief"}, {Role: "user", Content: "hi"}},
+	}, false)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["system"] != "be brief" {
+		t.Errorf("system = %#v, want a plain string", body["system"])
+	}
+	if strings.Contains(string(payload), "cache_control") {
+		t.Error("cache_control should be omitted when prompt caching is off")
 	}
 }
 

@@ -80,7 +80,7 @@
               <button type="button" data-format="json">JSON <span>.json</span></button>
             </div>
           </div>
-          <button class="icon-btn" id="undoBtn" title="Revert files from the last turn" aria-label="Undo last turn" hidden>
+          <button class="icon-btn" id="undoBtn" title="Review checkpoints and roll back" aria-label="Review checkpoints and roll back" hidden>
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-1"/></svg>
           </button>
           <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">
@@ -145,6 +145,14 @@
           <input class="palette-filter" id="filesFilter" type="text" placeholder="Filter files…" autocomplete="off" spellcheck="false" aria-label="Filter files">
           <div class="palette-list" id="filesList"></div>
           <div class="palette-foot" id="filesHint">Click a file to mention it</div>
+        </div>
+        <div class="palette" id="checkpointPalette" hidden>
+          <div class="palette-head">
+            <span class="palette-path">Checkpoints</span>
+            <button class="palette-btn" id="checkpointsCloseBtn" type="button" title="Close" aria-label="Close checkpoints">×</button>
+          </div>
+          <div class="palette-list checkpoints-list" id="checkpointsList"></div>
+          <div class="palette-foot">Click a checkpoint to show its diff · roll back to revert that turn and everything after</div>
         </div>
         <div class="palette" id="commandPalette" hidden>
           <div class="palette-list" id="commandList"></div>

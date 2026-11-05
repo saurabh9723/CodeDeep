@@ -67,6 +67,7 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 		Checkpoint: a.checkpoint,
 		Approval:   a.approval,
 		Skills:     a.skills,
+		Locks:      a.locks,
 	})
 	system := BuildSystemPrompt(a.cfg, depth, a.skills)
 	msgs := []llm.Message{{Role: "user", Content: args.Prompt}}
@@ -76,11 +77,13 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 		maxSteps = a.cfg.MaxSteps
 	}
 	text, err := child.runLoop(ctx, &msgs, system, nil, maxSteps)
+	a.locks.stats.Lock()
 	a.usage = a.usage.Add(child.usage)
 	a.turnUsage = a.turnUsage.Add(child.usage)
 	if a.session != nil {
 		a.session.Usage = a.session.Usage.Add(child.usage)
 	}
+	a.locks.stats.Unlock()
 
 	isErr := err != nil
 	report := text

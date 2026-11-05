@@ -32,11 +32,18 @@ type Session struct {
 }
 
 // Checkpoint is the pre-turn state of every file a turn mutated. Undo restores
-// the snapshots from the most recent checkpoint.
+// the snapshots from the most recent checkpoint; Diff captures the turn's
+// changes as a unified diff for review.
 type Checkpoint struct {
 	Turn  int            `json:"turn"`
 	Time  time.Time      `json:"time"`
 	Files []FileSnapshot `json:"files"`
+	// Diff is the unified diff between the pre-turn snapshots and the
+	// post-turn file contents, captured when the turn finished. Added and
+	// Removed count the diff's + and - lines.
+	Diff    string `json:"diff,omitempty"`
+	Added   int    `json:"added,omitempty"`
+	Removed int    `json:"removed,omitempty"`
 }
 
 // FileSnapshot is a file's content before the turn touched it. Existed is

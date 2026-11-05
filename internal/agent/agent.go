@@ -15,6 +15,7 @@ import (
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
 	"codedeep/internal/diagnostics"
+	"codedeep/internal/diff"
 	"codedeep/internal/hooks"
 	"codedeep/internal/llm"
 	"codedeep/internal/session"
@@ -28,6 +29,7 @@ const (
 	maxCheckpoints      = 20
 	maxCheckpointBytes  = 4 << 20
 	maxDiffPreviewBytes = 64 << 10
+	maxCheckpointDiff   = 64 << 10
 	maxParallelTools    = 4
 )
 
@@ -50,6 +52,20 @@ type Options struct {
 	Checkpoint *session.Checkpoint
 	Approval   string
 	Skills     *skills.Catalog
+	// Locks, when set, shares one lock set across the whole agent tree so
+	// parallel subagents cannot interleave events, approvals, checkpoint
+	// writes, or session saves. Subagents inherit their parent's locks.
+	Locks *sharedLocks
+}
+
+// sharedLocks serialize the parts of an agent tree that multiple goroutines
+// can touch when subagents run in parallel.
+type sharedLocks struct {
+	emit       sync.Mutex
+	approval   sync.Mutex
+	checkpoint sync.Mutex
+	save       sync.Mutex
+	stats      sync.Mutex
 }
 
 type Agent struct {
@@ -63,7 +79,7 @@ type Agent struct {
 	hooks     *hooks.Runner
 	diag      *diagnostics.Runner
 	skills    *skills.Catalog
-	emitMu    sync.Mutex
+	locks     *sharedLocks
 	depth     int
 	approval  string
 	autoAllow map[string]bool
@@ -73,13 +89,16 @@ type Agent struct {
 
 	session    *session.Session
 	checkpoint *session.Checkpoint
-	cpMu       sync.Mutex
 }
 
 func New(opts Options) *Agent {
 	depth := opts.Depth
 	if depth < 0 {
 		depth = 0
+	}
+	locks := opts.Locks
+	if locks == nil {
+		locks = &sharedLocks{}
 	}
 	a := &Agent{
 		cfg:        opts.Config,
@@ -92,6 +111,7 @@ func New(opts Options) *Agent {
 		hooks:      hooks.New(opts.Config, opts.Config.WorkDir),
 		diag:       diagnostics.New(opts.Config, opts.Config.WorkDir),
 		skills:     opts.Skills,
+		locks:      locks,
 		depth:      depth,
 		approval:   opts.Approval,
 		autoAllow:  map[string]bool{},
@@ -102,11 +122,11 @@ func New(opts Options) *Agent {
 	return a
 }
 
-// emitEvent serializes emission because read-only tool calls can run in
-// parallel.
+// emitEvent serializes emission because read-only tool calls and subagents
+// can run in parallel; the lock set is shared across the agent tree.
 func (a *Agent) emitEvent(ev Event) {
-	a.emitMu.Lock()
-	defer a.emitMu.Unlock()
+	a.locks.emit.Lock()
+	defer a.locks.emit.Unlock()
 	a.emit.Emit(ev)
 }
 
@@ -184,6 +204,7 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 			Temperature:     a.cfg.Temperature,
 			ReasoningEffort: a.cfg.ReasoningEffort,
 			ReasoningBudget: a.cfg.ReasoningBudget,
+			PromptCache:     a.cfg.PromptCache,
 		}, func(d llm.Delta) error {
 			if d.Reasoning != "" {
 				a.emitEvent(Event{Type: EventReasoning, SessionID: sessionID(sess), Depth: a.depth, Text: d.Reasoning})
@@ -280,10 +301,12 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 }
 
 // executeToolCalls runs a model turn's tool calls and returns the results in
-// call order. Batches that contain only read-only tools run concurrently.
+// call order. Batches that contain only read-only tools or subagents run
+// concurrently; subagents inherit a shared lock set so their shared state
+// (events, approvals, checkpoints, session saves) stays serialized.
 func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall, sess *session.Session, callUsage []llm.ToolUsage) []string {
 	results := make([]string, len(calls))
-	if len(calls) < 2 || !a.allReadOnly(calls) {
+	if len(calls) < 2 || !a.allParallelizable(calls) {
 		for i, tc := range calls {
 			if ctx.Err() != nil {
 				results[i] = "Error: cancelled by user."
@@ -318,10 +341,13 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall, sess
 	return results
 }
 
-func (a *Agent) allReadOnly(calls []llm.ToolCall) bool {
+func (a *Agent) allParallelizable(calls []llm.ToolCall) bool {
 	for _, tc := range calls {
 		spec, ok := a.reg.Get(tc.Function.Name)
-		if !ok || !spec.ReadOnly {
+		if !ok {
+			return false
+		}
+		if !spec.ReadOnly && spec.Name != "agent" {
 			return false
 		}
 		args := strings.TrimSpace(tc.Function.Arguments)
@@ -615,7 +641,13 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 		Path:       req.Path,
 		Diff:       req.Diff,
 	})
-	dec, err := a.approver.Approve(ctx, req)
+	dec, err := func() (approval.Decision, error) {
+		// Parallel subagents share one approver; serialize prompts so the
+		// user answers one at a time.
+		a.locks.approval.Lock()
+		defer a.locks.approval.Unlock()
+		return a.approver.Approve(ctx, req)
+	}()
 	if err != nil {
 		a.emitEvent(Event{
 			Type:       EventApprovalResult,
@@ -655,15 +687,15 @@ func (a *Agent) recordChange(ch *tools.Change) {
 	if ch == nil {
 		return
 	}
-	a.cpMu.Lock()
+	a.locks.checkpoint.Lock()
 	cp := a.checkpoint
 	if cp == nil {
-		a.cpMu.Unlock()
+		a.locks.checkpoint.Unlock()
 		return
 	}
 	for _, f := range cp.Files {
 		if f.Path == ch.Path {
-			a.cpMu.Unlock()
+			a.locks.checkpoint.Unlock()
 			return
 		}
 	}
@@ -672,7 +704,7 @@ func (a *Agent) recordChange(ch *tools.Change) {
 		size += len(f.Content)
 	}
 	if size+len(ch.Old) > maxCheckpointBytes {
-		a.cpMu.Unlock()
+		a.locks.checkpoint.Unlock()
 		return
 	}
 	cp.Files = append(cp.Files, session.FileSnapshot{
@@ -682,17 +714,17 @@ func (a *Agent) recordChange(ch *tools.Change) {
 		Content: ch.Old,
 	})
 	sess := a.session
-	a.cpMu.Unlock()
+	a.locks.checkpoint.Unlock()
 	if sess != nil {
 		a.save(sess)
 	}
 }
 
 func (a *Agent) finishCheckpoint(sess *session.Session) {
-	a.cpMu.Lock()
+	a.locks.checkpoint.Lock()
 	cp := a.checkpoint
 	a.checkpoint = nil
-	a.cpMu.Unlock()
+	a.locks.checkpoint.Unlock()
 	a.session = nil
 	if sess == nil || cp == nil {
 		return
@@ -708,7 +740,65 @@ func (a *Agent) finishCheckpoint(sess *session.Session) {
 	if len(sess.Checkpoints) > maxCheckpoints {
 		sess.Checkpoints = append([]session.Checkpoint(nil), sess.Checkpoints[len(sess.Checkpoints)-maxCheckpoints:]...)
 	}
+	if len(cp.Files) > 0 {
+		cp.Diff, cp.Added, cp.Removed = a.turnDiff(cp.Files)
+	}
 	a.save(sess)
+}
+
+// turnDiff renders the unified diff between each snapshot's pre-turn content
+// and the file's current on-disk content, capped at maxCheckpointDiff bytes.
+func (a *Agent) turnDiff(files []session.FileSnapshot) (string, int, int) {
+	var b strings.Builder
+	for _, f := range files {
+		abs := a.snapshotPath(f.Path)
+		cur, err := os.ReadFile(abs)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				continue
+			}
+			cur = nil
+		}
+		if d := diff.Unified(f.Path, f.Content, string(cur), 3); d != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(d)
+		}
+		if b.Len() >= maxCheckpointDiff {
+			return countDiffLines(util.TruncateMiddle(b.String(), maxCheckpointDiff))
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "", 0, 0
+	}
+	return countDiffLines(out)
+}
+
+func (a *Agent) snapshotPath(rel string) string {
+	if a.fs != nil {
+		if resolved, err := a.fs.Resolve(rel); err == nil {
+			return resolved
+		}
+	}
+	return filepath.Join(a.cfg.WorkDir, filepath.FromSlash(rel))
+}
+
+// countDiffLines returns the diff text with its added and removed line counts.
+func countDiffLines(text string) (string, int, int) {
+	added, removed := 0, 0
+	for _, line := range strings.Split(text, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+			continue
+		case strings.HasPrefix(line, "+"):
+			added++
+		case strings.HasPrefix(line, "-"):
+			removed++
+		}
+	}
+	return text, added, removed
 }
 
 // Undo restores the files captured by the most recent checkpoint and drops the
@@ -720,52 +810,80 @@ func (a *Agent) Undo(sess *session.Session) ([]string, error) {
 	if len(sess.Checkpoints) == 0 {
 		return nil, fmt.Errorf("nothing to undo")
 	}
-	cp := sess.Checkpoints[len(sess.Checkpoints)-1]
-	if len(cp.Files) == 0 {
+	last := &sess.Checkpoints[len(sess.Checkpoints)-1]
+	if len(last.Files) == 0 {
 		sess.Checkpoints = sess.Checkpoints[:len(sess.Checkpoints)-1]
 		a.save(sess)
 		return nil, fmt.Errorf("nothing to undo")
 	}
+	return a.UndoAt(sess, len(sess.Checkpoints)-1)
+}
 
-	restored := make([]string, 0, len(cp.Files))
-	var errs []error
-	for i := len(cp.Files) - 1; i >= 0; i-- {
-		f := cp.Files[i]
-		abs := f.Path
-		if a.fs != nil {
-			resolved, err := a.fs.Resolve(f.Path)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			abs = resolved
-		} else {
-			abs = filepath.Join(a.cfg.WorkDir, filepath.FromSlash(f.Path))
-		}
-		if !f.Existed {
-			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, fmt.Errorf("remove %s: %w", f.Path, err))
-				continue
-			}
-			restored = append(restored, f.Path)
-			continue
-		}
-		mode := os.FileMode(f.Mode)
-		if mode == 0 {
-			mode = 0o644
-		}
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			errs = append(errs, fmt.Errorf("restore %s: %w", f.Path, err))
-			continue
-		}
-		if err := os.WriteFile(abs, []byte(f.Content), mode); err != nil {
-			errs = append(errs, fmt.Errorf("restore %s: %w", f.Path, err))
-			continue
-		}
-		restored = append(restored, f.Path)
+// UndoAt reverts the workspace to its state before the checkpoint at index
+// idx (0-based, counting from the oldest kept checkpoint): every snapshot from
+// the newest checkpoint down to idx is applied, then those checkpoints are
+// dropped. It returns the restored workspace-relative paths.
+func (a *Agent) UndoAt(sess *session.Session, idx int) ([]string, error) {
+	if sess == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if idx < 0 || idx >= len(sess.Checkpoints) {
+		return nil, fmt.Errorf("checkpoint %d out of range (1-%d)", idx+1, len(sess.Checkpoints))
+	}
+	if len(sess.Checkpoints[idx].Files) == 0 {
+		return nil, fmt.Errorf("checkpoint %d has no file changes", idx+1)
 	}
 
-	sess.Checkpoints = sess.Checkpoints[:len(sess.Checkpoints)-1]
+	restored := make([]string, 0, len(sess.Checkpoints[idx].Files))
+	reported := map[string]bool{}
+	var errs []error
+	// Newer checkpoints are written first and older ones overwrite them, so
+	// the oldest snapshot wins: the workspace ends at its pre-turn state.
+	for i := len(sess.Checkpoints) - 1; i >= idx; i-- {
+		for j := len(sess.Checkpoints[i].Files) - 1; j >= 0; j-- {
+			f := sess.Checkpoints[i].Files[j]
+			abs := f.Path
+			if a.fs != nil {
+				resolved, err := a.fs.Resolve(f.Path)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				abs = resolved
+			} else {
+				abs = filepath.Join(a.cfg.WorkDir, filepath.FromSlash(f.Path))
+			}
+			if !f.Existed {
+				if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+					errs = append(errs, fmt.Errorf("remove %s: %w", f.Path, err))
+					continue
+				}
+				if !reported[f.Path] {
+					reported[f.Path] = true
+					restored = append(restored, f.Path)
+				}
+				continue
+			}
+			mode := os.FileMode(f.Mode)
+			if mode == 0 {
+				mode = 0o644
+			}
+			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", f.Path, err))
+				continue
+			}
+			if err := os.WriteFile(abs, []byte(f.Content), mode); err != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", f.Path, err))
+				continue
+			}
+			if !reported[f.Path] {
+				reported[f.Path] = true
+				restored = append(restored, f.Path)
+			}
+		}
+	}
+
+	sess.Checkpoints = sess.Checkpoints[:idx]
 	a.save(sess)
 	if len(errs) > 0 {
 		return restored, errors.Join(errs...)
@@ -783,15 +901,17 @@ func attributeToolUsage(usage llm.Usage, calls []llm.ToolCall) []llm.ToolUsage {
 	}
 	n := len(calls)
 	base := llm.Usage{
-		PromptTokens:         usage.PromptTokens / n,
-		CompletionTokens:     usage.CompletionTokens / n,
-		TotalTokens:          usage.TotalTokens / n,
-		PromptCacheHitTokens: usage.PromptCacheHitTokens / n,
+		PromptTokens:           usage.PromptTokens / n,
+		CompletionTokens:       usage.CompletionTokens / n,
+		TotalTokens:            usage.TotalTokens / n,
+		PromptCacheHitTokens:   usage.PromptCacheHitTokens / n,
+		PromptCacheWriteTokens: usage.PromptCacheWriteTokens / n,
 	}
 	remPrompt := usage.PromptTokens % n
 	remCompletion := usage.CompletionTokens % n
 	remTotal := usage.TotalTokens % n
 	remCache := usage.PromptCacheHitTokens % n
+	remCacheWrite := usage.PromptCacheWriteTokens % n
 	for i := range out {
 		u := base
 		if i < remPrompt {
@@ -805,6 +925,9 @@ func attributeToolUsage(usage llm.Usage, calls []llm.ToolCall) []llm.ToolUsage {
 		}
 		if i < remCache {
 			u.PromptCacheHitTokens++
+		}
+		if i < remCacheWrite {
+			u.PromptCacheWriteTokens++
 		}
 		out[i] = llm.ToolUsage{Calls: 1, Usage: u}
 	}
@@ -884,6 +1007,9 @@ func (a *Agent) save(sess *session.Session) {
 	if sess == nil || a.sessions == nil {
 		return
 	}
+	// Parallel subagents share one session file; serialize writes.
+	a.locks.save.Lock()
+	defer a.locks.save.Unlock()
 	if err := a.sessions.Save(sess); err != nil {
 		a.emitEvent(Event{Type: EventError, SessionID: sess.ID, Depth: a.depth, Message: "session save failed: " + err.Error()})
 	}

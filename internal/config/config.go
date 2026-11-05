@@ -15,9 +15,10 @@ import (
 // Price is an optional per-model price in USD per million tokens. When it is
 // configured the agent reports estimated costs alongside token counts.
 type Price struct {
-	InputPerMTok    float64 `json:"input_per_mtok"`
-	OutputPerMTok   float64 `json:"output_per_mtok"`
-	CacheHitPerMTok float64 `json:"cache_hit_per_mtok,omitempty"`
+	InputPerMTok      float64 `json:"input_per_mtok"`
+	OutputPerMTok     float64 `json:"output_per_mtok"`
+	CacheHitPerMTok   float64 `json:"cache_hit_per_mtok,omitempty"`
+	CacheWritePerMTok float64 `json:"cache_write_per_mtok,omitempty"`
 }
 
 type MCPServer struct {
@@ -76,6 +77,7 @@ type Config struct {
 	Temperature       float64              `json:"temperature"`
 	ReasoningEffort   string               `json:"reasoning_effort,omitempty"`
 	ReasoningBudget   int                  `json:"reasoning_budget_tokens,omitempty"`
+	PromptCache       bool                 `json:"prompt_cache"`
 	ContextWindow     int                  `json:"context_window"`
 	CompactAt         float64              `json:"compact_at"`
 	Approval          string               `json:"approval"`
@@ -129,6 +131,7 @@ func Default() *Config {
 		Model:         "deepseek-chat",
 		MaxTokens:     8192,
 		Temperature:   0.3,
+		PromptCache:   true,
 		ContextWindow: 128000,
 		CompactAt:     0.8,
 		Approval:      "ask",
@@ -274,6 +277,9 @@ func (c *Config) applyEnv() {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.ReasoningBudget = n
 		}
+	}
+	if v := os.Getenv("CODEAGENT_PROMPT_CACHE"); v != "" {
+		c.PromptCache = parseBool(v)
 	}
 	if v := os.Getenv("CODEAGENT_CONTEXT_WINDOW"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 1000 {
@@ -551,13 +557,25 @@ func (c *Config) UsageCost(u llm.Usage) (float64, bool) {
 	if cache > u.PromptTokens {
 		cache = u.PromptTokens
 	}
-	miss := u.PromptTokens - cache
+	write := u.PromptCacheWriteTokens
+	if write < 0 {
+		write = 0
+	}
+	if write > u.PromptTokens-cache {
+		write = u.PromptTokens - cache
+	}
+	miss := u.PromptTokens - cache - write
 	cost := float64(miss)*p.InputPerMTok/1e6 +
 		float64(u.CompletionTokens)*p.OutputPerMTok/1e6
 	if p.CacheHitPerMTok > 0 {
 		cost += float64(cache) * p.CacheHitPerMTok / 1e6
 	} else {
 		cost += float64(cache) * p.InputPerMTok / 1e6
+	}
+	if p.CacheWritePerMTok > 0 {
+		cost += float64(write) * p.CacheWritePerMTok / 1e6
+	} else {
+		cost += float64(write) * p.InputPerMTok / 1e6
 	}
 	return cost, true
 }

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("GET /api/sessions/{id}/checkpoints", s.handleListCheckpoints)
+	mux.HandleFunc("GET /api/sessions/{id}/checkpoints/{n}", s.handleGetCheckpoint)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExportSession)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
@@ -150,6 +153,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"context_window":   s.App.Cfg.ContextWindow,
 		"reasoning_effort": s.App.Cfg.ReasoningEffort,
 		"reasoning_budget": s.App.Cfg.ReasoningBudget,
+		"prompt_cache":     s.App.Cfg.PromptCache,
 		"plan":             approval == "plan",
 		"pricing":          s.App.Cfg.Pricing,
 	})
@@ -211,6 +215,59 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sess)
+}
+
+func (s *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.resolveSession(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	type cpInfo struct {
+		Number  int    `json:"number"`
+		Turn    int    `json:"turn"`
+		Time    string `json:"time"`
+		Files   int    `json:"files"`
+		Added   int    `json:"added"`
+		Removed int    `json:"removed"`
+	}
+	out := make([]cpInfo, 0, len(sess.Checkpoints))
+	for i, cp := range sess.Checkpoints {
+		out = append(out, cpInfo{
+			Number:  i + 1,
+			Turn:    cp.Turn,
+			Time:    cp.Time.UTC().Format(time.RFC3339),
+			Files:   len(cp.Files),
+			Added:   cp.Added,
+			Removed: cp.Removed,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"checkpoints": out})
+}
+
+func (s *Server) handleGetCheckpoint(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.resolveSession(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	n, err := strconv.Atoi(r.PathValue("n"))
+	if err != nil || n < 1 || n > len(sess.Checkpoints) {
+		writeError(w, http.StatusNotFound, "checkpoint not found")
+		return
+	}
+	cp := sess.Checkpoints[n-1]
+	paths := make([]string, 0, len(cp.Files))
+	for _, f := range cp.Files {
+		paths = append(paths, f.Path)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"number":  n,
+		"turn":    cp.Turn,
+		"time":    cp.Time.UTC().Format(time.RFC3339),
+		"files":   paths,
+		"added":   cp.Added,
+		"removed": cp.Removed,
+		"diff":    cp.Diff,
+	})
 }
 
 func (s *Server) handleExportSession(w http.ResponseWriter, r *http.Request) {
@@ -379,7 +436,8 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SessionID string `json:"session_id"`
+		SessionID  string `json:"session_id"`
+		Checkpoint int    `json:"checkpoint"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -402,7 +460,12 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	defer s.release(sess.ID)
 
 	ag := s.App.NewAgent(approval.DenyAll, nil)
-	files, err := ag.Undo(sess)
+	var files []string
+	if req.Checkpoint > 0 {
+		files, err = ag.UndoAt(sess, req.Checkpoint-1)
+	} else {
+		files, err = ag.Undo(sess)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "reverted": files})
 		return

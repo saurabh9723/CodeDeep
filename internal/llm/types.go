@@ -58,21 +58,27 @@ type ChatRequest struct {
 	// ReasoningBudget is an extended-thinking token budget for Anthropic and
 	// Gemini models.
 	ReasoningBudget int
+	// PromptCache enables provider-native prompt caching. It is currently
+	// explicit only for Anthropic; other providers cache automatically.
+	PromptCache bool
 }
 
 type Usage struct {
-	PromptTokens         int `json:"prompt_tokens"`
-	CompletionTokens     int `json:"completion_tokens"`
-	TotalTokens          int `json:"total_tokens"`
-	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
+	// PromptTokens is the total input, including cache hits and writes.
+	PromptTokens           int `json:"prompt_tokens"`
+	CompletionTokens       int `json:"completion_tokens"`
+	TotalTokens            int `json:"total_tokens"`
+	PromptCacheHitTokens   int `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheWriteTokens int `json:"prompt_cache_write_tokens,omitempty"`
 }
 
 func (u Usage) Add(o Usage) Usage {
 	return Usage{
-		PromptTokens:         u.PromptTokens + o.PromptTokens,
-		CompletionTokens:     u.CompletionTokens + o.CompletionTokens,
-		TotalTokens:          u.TotalTokens + o.TotalTokens,
-		PromptCacheHitTokens: u.PromptCacheHitTokens + o.PromptCacheHitTokens,
+		PromptTokens:           u.PromptTokens + o.PromptTokens,
+		CompletionTokens:       u.CompletionTokens + o.CompletionTokens,
+		TotalTokens:            u.TotalTokens + o.TotalTokens,
+		PromptCacheHitTokens:   u.PromptCacheHitTokens + o.PromptCacheHitTokens,
+		PromptCacheWriteTokens: u.PromptCacheWriteTokens + o.PromptCacheWriteTokens,
 	}
 }
 

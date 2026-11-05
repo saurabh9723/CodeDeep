@@ -118,6 +118,7 @@ grep -q "mock-output.txt:1:1 error missing header" "$TMP/out.txt"
 # Doctor reports the provider reasoning controls.
 "$TMP/codedeep$EXT" doctor -config "$TMP/tier3.json" >"$TMP/doctor.txt"
 grep -q "reasoning      off" "$TMP/doctor.txt"
+grep -q "prompt cache   on (automatic)" "$TMP/doctor.txt"
 
 # The editor launcher resolves workspace paths and passes the line number.
 "$TMP/codedeep$EXT" open -config "$TMP/tier3.json" -cwd "$TMP/work" mock-output.txt:7 >"$TMP/open.txt"
@@ -170,6 +171,7 @@ grep -q '"plan":false' "$TMP/boot.json"
 grep -q '"provider":"openai"' "$TMP/boot.json"
 grep -q '"reasoning_effort":""' "$TMP/boot.json"
 grep -q '"reasoning_budget":0' "$TMP/boot.json"
+grep -q '"prompt_cache":true' "$TMP/boot.json"
 grep -q '"name":"review"' "$TMP/boot.json"
 
 # Skills are discoverable through the API and include their body on demand.
@@ -238,10 +240,51 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
   -d '{"enabled":false}' "http://127.0.0.1:$WEBPORT/api/plan" >"$TMP/plan-off.json"
 grep -q '"plan":false' "$TMP/plan-off.json"
 
+# Multi-checkpoint review: list a session's checkpoints, inspect a diff, and
+# reject an out-of-range number.
+curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions/$SID/checkpoints" >"$TMP/cps.json"
+grep -q '"number":1' "$TMP/cps.json"
+grep -q '"turn":1' "$TMP/cps.json"
+grep -q '"added":1' "$TMP/cps.json"
+grep -q '"files":1' "$TMP/cps.json"
+curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions/$SID/checkpoints/1" >"$TMP/cp1.json"
+grep -q '+written by the mock model' "$TMP/cp1.json"
+grep -q '"removed":0' "$TMP/cp1.json"
+CP_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEBPORT/api/sessions/$SID/checkpoints/9")
+if [ "$CP_STATUS" != "404" ]; then
+  echo "unknown checkpoint should return 404, got $CP_STATUS" >&2
+  exit 1
+fi
+
 curl -fsS -X POST -H 'Content-Type: application/json' \
   -d "{\"session_id\":\"$SID\"}" "http://127.0.0.1:$WEBPORT/api/undo" >"$TMP/undo.json"
 grep -q '"reverted":\["mock-output.txt"\]' "$TMP/undo.json"
 test ! -f "$TMP/work/mock-output.txt"
+
+# Two mutating turns on one session create two checkpoints; rolling back
+# through the first restores the pre-turn state (file removed).
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"prompt":"write a demo file"}' "http://127.0.0.1:$WEBPORT/api/chat" >"$TMP/cp-chat1.ndjson"
+CP_SID=$(grep -o '"session_id":"[^"]*"' "$TMP/cp-chat1.ndjson" | head -n 1 | sed 's/.*:"//; s/"$//')
+if [ -z "$CP_SID" ] || [ ! -f "$TMP/sessions/$CP_SID.json" ]; then
+  echo "checkpoint chat session was not persisted" >&2
+  exit 1
+fi
+test -f "$TMP/work/mock-output.txt"
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d "{\"session_id\":\"$CP_SID\",\"prompt\":\"write it again\"}" \
+  "http://127.0.0.1:$WEBPORT/api/chat" >"$TMP/cp-chat2.ndjson"
+curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions/$CP_SID/checkpoints" >"$TMP/cps2.json"
+grep -q '"number":2' "$TMP/cps2.json"
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d "{\"session_id\":\"$CP_SID\",\"checkpoint\":1}" "http://127.0.0.1:$WEBPORT/api/undo" >"$TMP/undo-cp.json"
+grep -q '"reverted":\["mock-output.txt"\]' "$TMP/undo-cp.json"
+test ! -f "$TMP/work/mock-output.txt"
+curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions/$CP_SID/checkpoints" >"$TMP/cps3.json"
+if grep -q '"number":' "$TMP/cps3.json"; then
+  echo "rolled-back checkpoints should be dropped" >&2
+  exit 1
+fi
 
 AUTHPORT=${AUTHPORT:-18082}
 CODEAGENT_WEB_TOKEN=secret \

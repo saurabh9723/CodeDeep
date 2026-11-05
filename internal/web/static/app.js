@@ -80,7 +80,8 @@ function bindUI() {
   $('#refreshBtn').addEventListener('click', refreshSessions);
   $('#themeBtn').addEventListener('click', toggleTheme);
   $('#planChip').addEventListener('click', togglePlan);
-  $('#undoBtn').addEventListener('click', undoLastTurn);
+  $('#undoBtn').addEventListener('click', openCheckpoints);
+  $('#checkpointsCloseBtn').addEventListener('click', closeCheckpoints);
   $('#exportBtn').addEventListener('click', (e) => {
     e.stopPropagation();
     toggleExportMenu();
@@ -198,6 +199,9 @@ function bindUI() {
       } else if (state.files.open) {
         e.preventDefault();
         closeFilePalette();
+      } else if (!$('#checkpointPalette').hidden) {
+        e.preventDefault();
+        closeCheckpoints();
       } else if (state.running) {
         e.preventDefault();
         stopRun();
@@ -680,6 +684,7 @@ const slashCommands = [
   { name: '/compact', desc: 'Summarize older messages', run: () => compactNow() },
   { name: '/new', desc: 'Start a new session', run: () => newChat() },
   { name: '/plan', desc: 'Toggle plan mode', run: () => togglePlan() },
+  { name: '/checkpoints', desc: 'Review per-turn diffs', run: () => openCheckpoints() },
   { name: '/undo', desc: 'Revert the last turn', run: () => undoLastTurn() },
   { name: '/skills', desc: 'List workspace skills', run: () => showSkills() },
   { name: '/skill', desc: 'Run a skill: /skill name task', run: () => toast('Usage: /skill <name> [task]') },
@@ -756,6 +761,8 @@ async function runSlashCommand(text) {
       return;
     case '/plan':
       return togglePlan();
+    case '/checkpoints':
+      return openCheckpoints();
     case '/undo':
       return undoLastTurn();
     case '/export':
@@ -785,7 +792,7 @@ async function runSlashCommand(text) {
     }
     case '/help':
       toast(
-        'Slash commands: /compact, /new, /plan, /undo, /skills, /skill, /open, /export md|json, /sessions, /help',
+        'Slash commands: /compact, /new, /plan, /checkpoints, /undo, /skills, /skill, /open, /export md|json, /sessions, /help',
         6000
       );
       return;
@@ -1773,8 +1780,9 @@ function setCheckpoints(count) {
   btn.hidden = state.checkpoints === 0;
   btn.title =
     state.checkpoints === 0
-      ? 'No file changes to undo'
-      : 'Undo file changes from the last turn' + (state.checkpoints > 1 ? ` (${state.checkpoints} checkpoints)` : '');
+      ? 'No file changes to review'
+      : 'Review per-turn diffs and roll back' +
+        (state.checkpoints > 1 ? ` (${state.checkpoints} checkpoints)` : '');
 }
 
 function updatePlanChip(approval) {
@@ -1832,6 +1840,135 @@ async function undoLastTurn() {
     await refreshSessionState();
   } catch (err) {
     toast('Could not undo: ' + err.message, 5000);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * checkpoint review
+ * ------------------------------------------------------------------ */
+
+function openCheckpoints() {
+  if (state.running) {
+    toast('Wait for the current run to finish.');
+    return;
+  }
+  if (!state.sessionId) {
+    toast('There is no session to review.');
+    return;
+  }
+  closeFilePalette();
+  closeCommandPalette();
+  $('#checkpointPalette').hidden = false;
+  loadCheckpoints();
+}
+
+function closeCheckpoints() {
+  $('#checkpointPalette').hidden = true;
+}
+
+async function loadCheckpoints() {
+  const list = $('#checkpointsList');
+  if (!state.sessionId) return;
+  list.innerHTML = '';
+  list.append(el('div', 'palette-empty', 'Loading checkpoints…'));
+  try {
+    const res = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/checkpoints');
+    list.innerHTML = '';
+    const items = res.checkpoints || [];
+    if (!items.length) {
+      list.append(el('div', 'palette-empty', 'No checkpoints yet — one is kept for every turn that changes files.'));
+      return;
+    }
+    for (const cp of items.slice().reverse()) list.append(checkpointRow(cp));
+  } catch (err) {
+    list.innerHTML = '';
+    list.append(el('div', 'palette-empty', 'Could not list checkpoints: ' + err.message));
+  }
+}
+
+function checkpointRow(cp) {
+  const row = el('div', 'checkpoint-row');
+  const head = el('button', 'checkpoint-head');
+  head.type = 'button';
+  const stats = el('span', 'checkpoint-stats');
+  if (cp.added || cp.removed) {
+    stats.append(
+      el('span', 'cp-add', '+' + (cp.added || 0)),
+      el('span', 'cp-del', '-' + (cp.removed || 0))
+    );
+  } else {
+    stats.append(el('span', 'palette-desc', 'no changes'));
+  }
+  head.append(
+    el('span', 'checkpoint-num', '#' + cp.number),
+    el('span', 'checkpoint-turn', 'turn ' + cp.turn),
+    stats,
+    el('span', 'checkpoint-files', cp.files + ' file' + (cp.files === 1 ? '' : 's')),
+    el('span', 'checkpoint-time', new Date(cp.time).toLocaleString())
+  );
+  const body = el('div', 'checkpoint-body');
+  body.hidden = true;
+  head.addEventListener('click', () => {
+    if (!body.hidden) {
+      body.hidden = true;
+      return;
+    }
+    if (!body.childElementCount) loadCheckpointDiff(cp.number, body);
+    body.hidden = false;
+  });
+  const rollback = el('button', 'btn small', 'Roll back here');
+  rollback.type = 'button';
+  rollback.title = 'Revert every file change from this turn onward';
+  rollback.addEventListener('click', (e) => {
+    e.stopPropagation();
+    rollbackCheckpoint(cp.number, cp.turn);
+  });
+  row.append(head, body, rollback);
+  return row;
+}
+
+async function loadCheckpointDiff(number, body) {
+  body.append(el('div', 'palette-empty', 'Loading diff…'));
+  try {
+    const cp = await api(
+      '/api/sessions/' + encodeURIComponent(state.sessionId) + '/checkpoints/' + number
+    );
+    body.innerHTML = '';
+    const pre = el('pre', 'diff-pre');
+    appendDiff(pre, cp.diff || '');
+    if (!cp.diff) pre.append(el('span', 'diff-line meta', '(no recorded diff)'));
+    body.append(pre);
+  } catch (err) {
+    body.innerHTML = '';
+    body.append(el('div', 'palette-empty', 'Could not load diff: ' + err.message));
+  }
+}
+
+async function rollbackCheckpoint(number, turn) {
+  if (state.running) {
+    toast('Wait for the current run to finish.');
+    return;
+  }
+  const n = state.checkpoints || 0;
+  const through = n - number + 1;
+  if (
+    !window.confirm(
+      `Roll back through checkpoint #${number} (turn ${turn})?` +
+        (through > 1 ? ` This reverts the file changes from ${through} turns.` : ' This reverts that turn\u2019s file changes.')
+    )
+  )
+    return;
+  try {
+    const res = await api('/api/undo', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: state.sessionId, checkpoint: number }),
+    });
+    const files = res.reverted || [];
+    toast(files.length ? 'Rolled back ' + files.map(compactPath).join(', ') : 'Nothing to revert.');
+    closeCheckpoints();
+    await refreshSessionState();
+  } catch (err) {
+    toast('Could not roll back: ' + err.message, 5000);
   }
 }
 

@@ -122,6 +122,7 @@ type agentRunner interface {
 	Run(ctx context.Context, sess *session.Session, prompt string) error
 	CompactNow(ctx context.Context, sess *session.Session) (int, error)
 	Undo(sess *session.Session) ([]string, error)
+	UndoAt(sess *session.Session, idx int) ([]string, error)
 }
 
 func runREPL(a *app.App, cfg *config.Config, sess *session.Session, rend *renderer, lines *lineReader, approver approval.Approver) int {
@@ -325,7 +326,13 @@ func (r *repl) command(line string) bool {
 		r.togglePlan(arg)
 
 	case "/undo":
-		r.undoLastTurn()
+		r.undoTurn(arg)
+
+	case "/checkpoints", "/cps":
+		r.printCheckpoints()
+
+	case "/checkpoint", "/cp":
+		r.showCheckpointDiff(arg)
 
 	case "/reasoning":
 		r.render.showReasoning = !r.render.showReasoning
@@ -388,7 +395,9 @@ func (r *repl) printHelp() {
 		{"/models", "list models from the provider"},
 		{"/approval [mode]", "ask, auto, readonly, or plan"},
 		{"/plan [on|off]", "toggle read-only planning mode"},
-		{"/undo", "revert files changed in the last turn"},
+		{"/undo [n]", "revert the last turn, or roll back through checkpoint n"},
+		{"/checkpoints", "list checkpoints with per-turn diff stats"},
+		{"/checkpoint <n>", "show the diff captured by checkpoint n"},
 		{"/reasoning", "toggle the reasoning stream"},
 		{"/status", "session and runtime status"},
 		{"/tools", "list available tools"},
@@ -570,14 +579,88 @@ func (r *repl) togglePlan(arg string) {
 	}
 }
 
-func (r *repl) undoLastTurn() {
-	files, err := r.agent.Undo(r.sess)
+func (r *repl) undoTurn(arg string) {
+	if arg == "" {
+		files, err := r.agent.Undo(r.sess)
+		if len(files) > 0 {
+			r.render.Notice("reverted %d file(s): %s", len(files), strings.Join(files, ", "))
+		}
+		if err != nil {
+			r.render.Notice("undo: %v", err)
+		}
+		return
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(arg))
+	if err != nil || n < 1 {
+		r.render.Notice("usage: /undo [checkpoint-number] (see /checkpoints)")
+		return
+	}
+	cp := r.checkpointAt(n)
+	if cp == nil {
+		return
+	}
+	files, err := r.agent.UndoAt(r.sess, n-1)
 	if len(files) > 0 {
-		r.render.Notice("reverted %d file(s): %s", len(files), strings.Join(files, ", "))
+		r.render.Notice("rolled back %d file(s) through checkpoint %d (turn %d): %s", len(files), n, cp.Turn, strings.Join(files, ", "))
 	}
 	if err != nil {
 		r.render.Notice("undo: %v", err)
 	}
+}
+
+func (r *repl) checkpointAt(n int) *session.Checkpoint {
+	if len(r.sess.Checkpoints) == 0 {
+		r.render.Notice("no checkpoints yet — a checkpoint is kept for every turn that changes files")
+		return nil
+	}
+	if n < 1 || n > len(r.sess.Checkpoints) {
+		r.render.Notice("checkpoint %d out of range (1-%d)", n, len(r.sess.Checkpoints))
+		return nil
+	}
+	return &r.sess.Checkpoints[n-1]
+}
+
+func (r *repl) printCheckpoints() {
+	p := r.render.p
+	cps := r.sess.Checkpoints
+	if len(cps) == 0 {
+		r.render.Notice("no checkpoints yet — a checkpoint is kept for every turn that changes files")
+		return
+	}
+	fmt.Fprintln(os.Stdout, p.bold("Checkpoints (oldest first)"))
+	for i, cp := range cps {
+		paths := make([]string, 0, len(cp.Files))
+		for _, f := range cp.Files {
+			paths = append(paths, f.Path)
+		}
+		stats := p.dim("no changes")
+		if cp.Diff != "" {
+			stats = fmt.Sprintf("%s %s", p.green(fmt.Sprintf("+%d", cp.Added)), p.red(fmt.Sprintf("-%d", cp.Removed)))
+		}
+		fmt.Fprintf(os.Stdout, "  %s turn %-3d %s  %d file(s)  %s\n",
+			p.cyan(fmt.Sprintf("#%d", i+1)), cp.Turn, cp.Time.Format("2006-01-02 15:04"), len(cp.Files), stats)
+		if arg := strings.Join(paths, ", "); arg != "" {
+			fmt.Fprintf(os.Stdout, "      %s\n", p.dim(arg))
+		}
+	}
+	r.render.Notice("show a diff with /checkpoint <n>, roll back with /undo <n>")
+}
+
+func (r *repl) showCheckpointDiff(arg string) {
+	n, err := strconv.Atoi(strings.TrimSpace(arg))
+	if err != nil || n < 1 {
+		r.render.Notice("usage: /checkpoint <n> (see /checkpoints)")
+		return
+	}
+	cp := r.checkpointAt(n)
+	if cp == nil {
+		return
+	}
+	if cp.Diff == "" {
+		r.render.Notice("checkpoint %d (turn %d) has no diff", n, cp.Turn)
+		return
+	}
+	r.render.printDiff(fmt.Sprintf("checkpoint #%d (turn %d)\n%s", n, cp.Turn, cp.Diff), 0)
 }
 
 func (r *repl) printTools() {

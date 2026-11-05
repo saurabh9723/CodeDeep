@@ -16,8 +16,10 @@ the browser.
   `bash`, and `agent` for subagents.
 - **Diff previews and undo** — `write_file` and `edit_file` show a unified diff
   before they run, including in the approval prompt. Every turn snapshots the
-  files it touches, so `/undo` (or the web undo button) restores the previous
-  contents or removes files that were created.
+  files it touches and records the turn's unified diff, so `/undo` (or the web
+  undo button) restores the previous contents or removes files that were
+  created, while `/checkpoints` and the web checkpoint panel review each turn's
+  diff and roll back through any checkpoint.
 - **Plan mode** — a read-only mode that blocks mutations and asks the model to
   produce a concrete plan. Switch to another mode to execute it.
 - **Git awareness** — read-only `git_status` and `git_diff` tools, plus the
@@ -31,6 +33,11 @@ the browser.
   calls stay sequential and ordered.
 - **Context management** — automatic compaction at 80% of the context window
   with a boundary-safe cut, plus `/compact` on demand.
+- **Parallel subagents** — a model turn that spawns several `agent` subagents
+  runs them concurrently. Each subagent keeps its own isolated history while
+  sharing one serialized lock set for events, approvals, checkpoints, and
+  session saves, so parallel children cannot corrupt shared state; their token
+  usage counts toward the session. Subagents nest up to two levels.
 - **Subagents** — isolated history, shared approvals and checkpoints, nested up
   to two levels; their token usage counts toward the session.
 - **Cost estimates** — optional per-model pricing in the config; the CLI and
@@ -44,9 +51,10 @@ the browser.
   Anthropic Messages and Gemini generateContent adapters and an Ollama preset;
   switch with `-provider` or the config file.
 - **Web UI** — Qoder-style interface served from the same binary, no Node or
-  Electron required. Includes diff cards, plan mode, undo, a searchable session
-  sidebar, a file picker with `@`-mentions, a slash-command palette, and
-  image paste/drag-drop for vision models.
+  Electron required. Includes diff cards, plan mode, a checkpoint review panel
+  with per-turn diffs and rollback, undo, a searchable session sidebar, a file
+  picker with `@`-mentions, a slash-command palette, and image paste/drag-drop
+  for vision models.
 - **Images** — attach up to four PNG/JPEG/WebP/GIF images to a message (5 MB
   each) in the web UI; they are sent as multimodal content and kept in session
   exports.
@@ -111,9 +119,9 @@ echo "summarize the last commit" | ./bin/codedeep -p -
 
 REPL commands: `/help`, `/new`, `/sessions [query]`, `/resume <id|#|title>`,
 `/export [md|json] [path]`, `/title`, `/model`, `/models`, `/approval`,
-`/plan [on|off]`, `/undo`, `/reasoning`, `/status`, `/tools`, `/compact`,
-`/skills`, `/skill <name> [task]`, `/jobs`, `/job <id>`, `/kill <id>`,
-`/open [path[:line]]`, `/clear`, `/quit`.
+`/plan [on|off]`, `/checkpoints`, `/checkpoint <n>`, `/undo [n]`, `/reasoning`,
+`/status`, `/tools`, `/compact`, `/skills`, `/skill <name> [task]`, `/jobs`,
+`/job <id>`, `/kill <id>`, `/open [path[:line]]`, `/clear`, `/quit`.
 
 Sessions can also be searched and exported without entering the REPL:
 
@@ -182,6 +190,7 @@ config file is fine. See [`config.example.json`](config.example.json).
   "temperature": 0.3,
   "reasoning_effort": "",
   "reasoning_budget_tokens": 0,
+  "prompt_cache": true,
   "context_window": 128000,
   "compact_at": 0.8,
   "approval": "ask",
@@ -223,7 +232,8 @@ config file is fine. See [`config.example.json`](config.example.json).
 `pricing` is optional. Its keys are model names; values are USD per million
 tokens. When a model has a price entry, `/status` and the web header show an
 estimated cost alongside token counts. Cached prompt tokens use
-`cache_hit_per_mtok` when set, otherwise the normal input rate. Each model turn
+`cache_hit_per_mtok` when set, otherwise the normal input rate; Anthropic cache
+writes use `cache_write_per_mtok` the same way. Each model turn
 is split evenly across the tool calls it requested, so `/status`, the web
 header, and the finished-turn summary can show usage and cost by tool as well as
 per turn and per session. Prices change, so check your provider's current rates.
@@ -239,6 +249,7 @@ DEEPSEEK_BASE_URL=...            # CODEAGENT_BASE_URL and OPENAI_BASE_URL also w
 CODEAGENT_MODEL=deepseek-chat
 CODEAGENT_REASONING_EFFORT=medium   # minimal, low, medium, or high
 CODEAGENT_REASONING_BUDGET=8000     # extended thinking tokens (Anthropic, Gemini)
+CODEAGENT_PROMPT_CACHE=true          # Anthropic cache_control breakpoints
 CODEAGENT_APPROVAL=ask
 CODEAGENT_CONTEXT_WINDOW=128000
 CODEAGENT_COMPACT_AT=0.8
@@ -299,6 +310,22 @@ Reasoning is opt-in and provider-specific:
 
 Budgets are clamped to 1024–64000 tokens and `0` disables extended thinking.
 `codedeep doctor` prints the active reasoning settings.
+
+### Prompt caching
+
+Prompt caching reuses the model's read of your system prompt, tool
+declarations, and conversation prefix, cutting both cost and latency.
+
+- **Anthropic** — explicit `cache_control` breakpoints are placed on the system
+  prompt, the last tool, and the tail of the conversation. Set
+  `prompt_cache: false` (or `CODEAGENT_PROMPT_CACHE=false`) to send plain
+  requests. Cache reads are reported as cache-hit tokens and priced with
+  `cache_hit_per_mtok`; cache writes are reported and priced with
+  `cache_write_per_mtok`.
+- **OpenAI-compatible and DeepSeek** — caching is automatic and always on; no
+  request changes are needed. Cache hits show up in token usage.
+- **Gemini** — Gemini 2.5 implicit caching is automatic; cached tokens are
+  reported in usage.
 
 ### Project instructions
 
@@ -460,13 +487,19 @@ mode:
   concrete plan for a later run.
 
 Each turn records a checkpoint of the pre-change contents of every file that
-`write_file` or `edit_file` touches (up to 1 MB per file). `/undo` restores the
-most recent checkpoint and removes files that did not exist before the turn.
-The last 20 checkpoints are kept with the session.
+`write_file` or `edit_file` touches (up to 1 MB per file), plus the unified diff
+of the turn's changes. `/checkpoints` lists them with per-turn `+added/-removed`
+stats, `/checkpoint <n>` shows a checkpoint's diff, and `/undo` restores the
+most recent checkpoint (removing files that did not exist before the turn).
+`/undo <n>` rolls the workspace back through checkpoint `n` — it reverts every
+file change from that turn onward and drops the rolled-back checkpoints. The
+last 20 checkpoints are kept with the session.
 
 When a model requests several read-only tools in one turn, CodeDeep runs them
-concurrently (up to four) and still reports results in call order. Any batch
-that contains a mutating tool runs sequentially.
+concurrently (up to four) and still reports results in call order. A batch of
+`agent` subagent calls runs concurrently too, sharing one serialized lock set
+for events, approvals, checkpoints, and session saves. Any batch that contains
+a mutating tool runs sequentially.
 
 ### Permission rules
 
@@ -628,6 +661,12 @@ events, so behavior stays consistent.
 
 ## Roadmap
 
-- Parallel subagents.
-- Per-turn diff review across multiple checkpoints.
+Nothing queued — the previously planned per-turn diff review across multiple
+checkpoints is now implemented.
+
+## Done from the roadmap
+
+- Multi-checkpoint diff review (`/checkpoints`, `/checkpoint <n>`, `/undo <n>`,
+  and the web checkpoint panel).
+- Parallel subagents (and parallel read-only tool batches).
 - Provider-native prompt caching controls.
