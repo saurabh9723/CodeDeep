@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"codedeep/internal/config"
+	"codedeep/internal/tools"
 )
 
 // BuildSystemPrompt assembles the agent identity, environment, rules, and
@@ -29,12 +30,19 @@ func BuildSystemPrompt(cfg *config.Config, depth int) string {
 		fmt.Fprintf(&b, " (shell: %s)", cfg.Shell)
 	}
 	fmt.Fprintf(&b, "\nDate: %s\n", time.Now().Format("2006-01-02"))
-	fmt.Fprintf(&b, "Approval mode: %s\n", cfg.Approval)
+	approval := cfg.ApprovalMode()
+	fmt.Fprintf(&b, "Approval mode: %s\n", approval)
+	if depth == 0 {
+		if brief := tools.GitBrief(cfg.WorkDir); brief != "" {
+			fmt.Fprintf(&b, "Git: %s. Use git_status and git_diff for details.\n", brief)
+		}
+	}
 
 	b.WriteString(`
 # How to work
 - Use the tools instead of guessing. Read relevant files before you modify them.
 - Explore with glob, grep, and read_file. Use bash for builds, tests, git, and commands that need a real shell.
+- Use git_status and git_diff to understand uncommitted changes before reviewing or modifying code.
 - Keep changes focused and consistent with the existing code. Do not refactor unrelated code.
 - After changing code, verify it when practical (build, type-check, tests) and report the actual result.
 - Never fabricate file contents, command output, or test results.
@@ -46,6 +54,15 @@ func BuildSystemPrompt(cfg *config.Config, depth int) string {
 - The user can see tool calls and their output, so do not paste large outputs back into your reply.
 - End with a short summary: what changed, where, and how it was verified.
 `)
+	if approval == "plan" {
+		b.WriteString(`
+# Plan mode
+- You are in read-only planning mode. Investigate with read-only tools only.
+- Do not create, edit, delete, or move files, and do not run commands that change the workspace.
+- Produce a concrete numbered plan: files to change, the approach, risks, and how to verify the result.
+- Do not claim that any change was made. The user will leave plan mode and approve execution separately.
+`)
+	}
 	if depth > 0 {
 		b.WriteString(`
 # Subagent output

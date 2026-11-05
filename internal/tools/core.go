@@ -28,7 +28,8 @@ func RegisterCore(r *Registry, f *FS, shell string) {
 			"path":    StrProp("Workspace-relative or absolute path to write."),
 			"content": StrProp("Complete file content."),
 		}, "path", "content"),
-		Run: f.writeFile,
+		Preview: f.previewWrite,
+		Run:     f.writeFile,
 	})
 
 	r.Register(&Spec{
@@ -42,7 +43,8 @@ func RegisterCore(r *Registry, f *FS, shell string) {
 			"new_string":  StrProp("Replacement text."),
 			"replace_all": BoolProp("Replace all occurrences instead of requiring a unique match."),
 		}, "path", "old_string", "new_string"),
-		Run: f.editFile,
+		Preview: f.previewEdit,
+		Run:     f.editFile,
 	})
 
 	r.Register(&Spec{
@@ -87,4 +89,6 @@ func RegisterCore(r *Registry, f *FS, shell string) {
 			return f.runShell(ctx, shell, raw)
 		},
 	})
+
+	RegisterGit(r, f)
 }

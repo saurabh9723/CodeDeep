@@ -109,6 +109,8 @@ type repl struct {
 
 	sess     *session.Session
 	listings []session.Meta
+	// prevApproval is restored when plan mode is turned off.
+	prevApproval string
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -118,6 +120,7 @@ type repl struct {
 type agentRunner interface {
 	Run(ctx context.Context, sess *session.Session, prompt string) error
 	CompactNow(ctx context.Context, sess *session.Session) (int, error)
+	Undo(sess *session.Session) ([]string, error)
 }
 
 func runREPL(a *app.App, cfg *config.Config, sess *session.Session, rend *renderer, lines *lineReader, approver approval.Approver) int {
@@ -295,12 +298,21 @@ func (r *repl) command(line string) bool {
 			return false
 		}
 		switch strings.ToLower(arg) {
-		case "ask", "auto", "readonly":
+		case "ask", "auto", "readonly", "plan":
+			if strings.ToLower(arg) == "plan" && r.cfg.Approval != "plan" {
+				r.prevApproval = r.cfg.Approval
+			}
 			r.cfg.Approval = strings.ToLower(arg)
 			r.render.Notice("approval mode set to %s (this run only)", r.cfg.Approval)
 		default:
-			r.render.Notice("usage: /approval [ask|auto|readonly]")
+			r.render.Notice("usage: /approval [ask|auto|readonly|plan]")
 		}
+
+	case "/plan":
+		r.togglePlan(arg)
+
+	case "/undo":
+		r.undoLastTurn()
 
 	case "/reasoning":
 		r.render.showReasoning = !r.render.showReasoning
@@ -342,7 +354,9 @@ func (r *repl) printHelp() {
 		{"/title <text>", "rename the current session"},
 		{"/model [name]", "show or change the model"},
 		{"/models", "list models from the provider"},
-		{"/approval [mode]", "ask, auto, or readonly"},
+		{"/approval [mode]", "ask, auto, readonly, or plan"},
+		{"/plan [on|off]", "toggle read-only planning mode"},
+		{"/undo", "revert files changed in the last turn"},
 		{"/reasoning", "toggle the reasoning stream"},
 		{"/status", "session and runtime status"},
 		{"/tools", "list available tools"},
@@ -453,7 +467,46 @@ func (r *repl) printStatus() {
 	fmt.Fprintf(os.Stdout, "  %-12s %d (%d turns)\n", p.dim("messages"), len(r.sess.Messages), r.sess.Turns)
 	fmt.Fprintf(os.Stdout, "  %-12s %s total (%s prompt, %s completion)\n", p.dim("tokens"),
 		humanTokens(u.TotalTokens), humanTokens(u.PromptTokens), humanTokens(u.CompletionTokens))
+	if cost, ok := r.cfg.UsageCost(u); ok {
+		fmt.Fprintf(os.Stdout, "  %-12s %s (estimated)\n", p.dim("cost"), humanCost(cost))
+	}
+	fmt.Fprintf(os.Stdout, "  %-12s %d turn checkpoint(s)\n", p.dim("undo"), len(r.sess.Checkpoints))
 	fmt.Fprintf(os.Stdout, "  %-12s %d built-in, %d MCP server(s)\n", p.dim("tools"), len(r.app.Registry.List()), r.app.MCPCount())
+}
+
+func (r *repl) togglePlan(arg string) {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "", "on":
+		if r.cfg.Approval == "plan" {
+			r.render.Notice("plan mode is already on")
+			return
+		}
+		r.prevApproval = r.cfg.Approval
+		r.cfg.Approval = "plan"
+		r.render.Notice("plan mode on — read-only investigation; file changes are blocked")
+	case "off":
+		if r.cfg.Approval != "plan" {
+			r.render.Notice("plan mode is already off")
+			return
+		}
+		r.cfg.Approval = r.prevApproval
+		if r.cfg.Approval == "" || r.cfg.Approval == "plan" {
+			r.cfg.Approval = "ask"
+		}
+		r.render.Notice("plan mode off — approval mode %s", r.cfg.Approval)
+	default:
+		r.render.Notice("usage: /plan [on|off]")
+	}
+}
+
+func (r *repl) undoLastTurn() {
+	files, err := r.agent.Undo(r.sess)
+	if len(files) > 0 {
+		r.render.Notice("reverted %d file(s): %s", len(files), strings.Join(files, ", "))
+	}
+	if err != nil {
+		r.render.Notice("undo: %v", err)
+	}
 }
 
 func (r *repl) printTools() {

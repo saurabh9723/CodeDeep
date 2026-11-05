@@ -22,6 +22,9 @@ const state = {
   keyPresent: true,
   lastSessions: [],
   usage: null,
+  cost: 0,
+  plan: false,
+  checkpoints: 0,
 };
 
 const chat = $('#chat');
@@ -45,8 +48,11 @@ async function init() {
     const boot = await api('/api/bootstrap');
     state.boot = boot;
     state.keyPresent = !!boot.api_key_present;
+    state.plan = !!boot.plan;
     $('#modelChip').textContent = boot.model;
     $('#approvalChip').textContent = boot.approval + ' mode';
+    updatePlanChip(boot.approval);
+    setCheckpoints(0);
     $('#workspaceLabel').textContent = compactPath(boot.workspace);
     $('#workspaceLabel').title = boot.workspace;
     $('#versionLabel').textContent = 'v' + boot.version;
@@ -69,6 +75,8 @@ function bindUI() {
   $('#newChatBtn').addEventListener('click', newChat);
   $('#refreshBtn').addEventListener('click', refreshSessions);
   $('#themeBtn').addEventListener('click', toggleTheme);
+  $('#planChip').addEventListener('click', togglePlan);
+  $('#undoBtn').addEventListener('click', undoLastTurn);
   $('#helpBtn').addEventListener('click', () =>
     toast('Enter to send · Shift+Enter for a newline · Ctrl/⌘+N for a new chat · Ctrl/⌘+K to focus · Esc to stop', 6000)
   );
@@ -174,8 +182,9 @@ async function loadSession(id) {
     clearChat();
     renderHistory(sess);
     setTitle(sess.title || 'Session');
-    setUsage(sess.usage || null);
     if (sess.model) $('#modelChip').textContent = sess.model;
+    setUsage(sess.usage || null);
+    setCheckpoints((sess.checkpoints || []).length);
     await refreshSessions();
     closeSidebar();
     input.focus();
@@ -208,6 +217,7 @@ function newChat() {
   showEmpty();
   setTitle('New session');
   setUsage(null);
+  setCheckpoints(0);
   renderSessions(state.lastSessions);
   closeSidebar();
   input.focus();
@@ -270,6 +280,7 @@ async function send() {
     setRunning(false);
     finalizeAssistant();
     state.abort = null;
+    await refreshSessionState();
     await refreshSessions();
     input.focus();
   }
@@ -338,6 +349,9 @@ function handleEvent(ev) {
     case 'tool_end':
       onToolEnd(ev);
       break;
+    case 'diff':
+      onDiff(ev);
+      break;
     case 'approval_request':
       onApprovalRequest(ev);
       break;
@@ -351,7 +365,7 @@ function handleEvent(ev) {
       onSubagentEnd(ev);
       break;
     case 'usage':
-      setUsage(ev.total_usage || ev.usage || null);
+      setUsage(ev.total_usage || ev.usage || null, ev.total_cost_usd || 0);
       break;
     case 'compact':
       addNote(ev.message || 'Context compacted');
@@ -362,6 +376,7 @@ function handleEvent(ev) {
       break;
     case 'done':
       if (ev.message === 'stopped') addNote('Stopped by user', 'warn');
+      if (typeof ev.checkpoints === 'number') setCheckpoints(ev.checkpoints);
       break;
     default:
       break;
@@ -549,6 +564,43 @@ function setToolResultOn(card, output, isError) {
   card._pre.scrollTop = card._pre.scrollHeight;
 }
 
+function onDiff(ev) {
+  const depth = ev.depth || 0;
+  const parent = depth > 0 && state.subagents.length ? subagentHost() : (state.turn || newTurn());
+  const card = el('div', 'diff-card' + (depth > 0 ? ' nested' : ''));
+  const head = el('div', 'diff-head');
+  head.append(
+    el('span', 'diff-icon', '±'),
+    el('span', 'diff-path', ev.path || ev.name || 'changes'),
+    el('span', 'diff-badge', ev.name || 'proposed changes')
+  );
+  const pre = el('pre', 'diff-pre');
+  appendDiff(pre, ev.diff || '');
+  card.append(head, pre);
+  parent.append(card);
+  scrollSoon();
+}
+
+function appendDiff(pre, text) {
+  const lines = String(text || '').split('\n');
+  const max = 400;
+  for (let i = 0; i < lines.length; i++) {
+    if (i === lines.length - 1 && lines[i] === '') continue;
+    if (i >= max) {
+      pre.append(el('span', 'diff-line meta', `… ${lines.length - max} more lines`));
+      break;
+    }
+    const line = lines[i];
+    let cls = 'diff-line';
+    if (line.startsWith('+++') || line.startsWith('---')) cls += ' meta';
+    else if (line.startsWith('@@')) cls += ' hunk';
+    else if (line.startsWith('+')) cls += ' add';
+    else if (line.startsWith('-')) cls += ' del';
+    else if (line.startsWith('[')) cls += ' meta';
+    pre.append(el('span', cls, line || ' '));
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * approvals
  * ------------------------------------------------------------------ */
@@ -565,10 +617,13 @@ function onApprovalRequest(ev) {
   head.append(
     el('span', 'badge warn', 'Approval required'),
     el('span', 'approval-tool', ev.name || 'tool'),
-    el('span', 'approval-note', 'wants to run in your workspace')
+    el('span', 'approval-note', ev.diff ? 'review the proposed diff above' : 'wants to run in your workspace')
   );
 
-  const pre = el('pre', 'approval-args', prettyArgs(ev.args) || '(no arguments)');
+  const argsText = ev.diff
+    ? truncate(prettyArgs(ev.args), 1600)
+    : prettyArgs(ev.args) || '(no arguments)';
+  const pre = el('pre', 'approval-args', argsText);
   const actions = el('div', 'approval-actions');
   const result = el('div', 'approval-result');
 
@@ -949,16 +1004,122 @@ function setTitle(text) {
   document.title = title === 'New session' ? 'CodeDeep' : title + ' — CodeDeep';
 }
 
-function setUsage(usage) {
-  state.usage = usage;
+function pricingFor(model) {
+  const table = (state.boot && state.boot.pricing) || {};
+  const p = table[model || $('#modelChip').textContent];
+  if (!p || (!p.input_per_mtok && !p.output_per_mtok)) return null;
+  return p;
+}
+
+function costFor(usage, model) {
+  const p = pricingFor(model);
+  if (!p || !usage) return 0;
+  const prompt = Number(usage.prompt_tokens) || 0;
+  let cache = Number(usage.prompt_cache_hit_tokens) || 0;
+  cache = Math.max(0, Math.min(cache, prompt));
+  const miss = prompt - cache;
+  const cacheRate = p.cache_hit_per_mtok > 0 ? p.cache_hit_per_mtok : p.input_per_mtok || 0;
+  return (
+    (miss * (p.input_per_mtok || 0) +
+      (Number(usage.completion_tokens) || 0) * (p.output_per_mtok || 0) +
+      cache * cacheRate) /
+    1e6
+  );
+}
+
+function fmtCost(value) {
+  const v = Number(value) || 0;
+  if (v <= 0) return '';
+  if (v < 0.01) return '~$' + v.toFixed(4);
+  if (v < 1) return '~$' + v.toFixed(3);
+  return '~$' + v.toFixed(2);
+}
+
+function setUsage(usage, totalCost) {
+  state.usage = usage || null;
+  state.cost = typeof totalCost === 'number' && totalCost > 0 ? totalCost : costFor(state.usage);
   const chip = $('#usageChip');
   if (!usage || !usage.total_tokens) {
     chip.hidden = true;
     return;
   }
   chip.hidden = false;
-  chip.textContent = `↑ ${fmtShort(usage.prompt_tokens)} · ↓ ${fmtShort(usage.completion_tokens)} · ${fmtShort(usage.total_tokens)} tok`;
-  chip.title = `${usage.prompt_tokens || 0} prompt tokens, ${usage.completion_tokens || 0} completion tokens`;
+  const cost = fmtCost(state.cost);
+  chip.textContent =
+    `↑ ${fmtShort(usage.prompt_tokens)} · ↓ ${fmtShort(usage.completion_tokens)} · ${fmtShort(usage.total_tokens)} tok` +
+    (cost ? ` · ${cost}` : '');
+  chip.title =
+    `${usage.prompt_tokens || 0} prompt tokens, ${usage.completion_tokens || 0} completion tokens` +
+    (cost ? `, estimated ${cost}` : '');
+}
+
+function setCheckpoints(count) {
+  state.checkpoints = Number(count) || 0;
+  const btn = $('#undoBtn');
+  if (!btn) return;
+  btn.hidden = state.checkpoints === 0;
+  btn.title =
+    state.checkpoints === 0
+      ? 'No file changes to undo'
+      : 'Undo file changes from the last turn' + (state.checkpoints > 1 ? ` (${state.checkpoints} checkpoints)` : '');
+}
+
+function updatePlanChip(approval) {
+  if (approval) state.plan = approval === 'plan';
+  const chip = $('#planChip');
+  if (!chip) return;
+  chip.textContent = state.plan ? 'plan on' : 'plan off';
+  chip.classList.toggle('on', state.plan);
+  chip.setAttribute('aria-pressed', state.plan ? 'true' : 'false');
+  const mode = $('#approvalChip');
+  if (mode && approval) mode.textContent = approval + ' mode';
+}
+
+async function refreshSessionState() {
+  if (!state.sessionId) return;
+  try {
+    const sess = await api('/api/sessions/' + encodeURIComponent(state.sessionId));
+    setCheckpoints((sess.checkpoints || []).length);
+    setUsage(sess.usage || null);
+  } catch {
+    /* non-fatal */
+  }
+}
+
+async function togglePlan() {
+  try {
+    const res = await api('/api/plan', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: !state.plan }),
+    });
+    updatePlanChip(res.approval);
+    toast(res.plan ? 'Plan mode on — tools cannot modify files.' : 'Plan mode off — ' + res.approval + ' mode.');
+  } catch (err) {
+    toast('Could not change plan mode: ' + err.message);
+  }
+}
+
+async function undoLastTurn() {
+  if (state.running) {
+    toast('Wait for the current run to finish.');
+    return;
+  }
+  if (!state.sessionId) {
+    toast('There is no session to undo.');
+    return;
+  }
+  if (!window.confirm('Revert the file changes from the last turn?')) return;
+  try {
+    const res = await api('/api/undo', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: state.sessionId }),
+    });
+    const files = res.reverted || [];
+    toast(files.length ? 'Reverted ' + files.map(compactPath).join(', ') : 'Nothing to undo.');
+    await refreshSessionState();
+  } catch (err) {
+    toast('Could not undo: ' + err.message, 5000);
+  }
 }
 
 function setRunning(running, text) {

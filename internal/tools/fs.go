@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"codedeep/internal/diff"
 	"codedeep/internal/util"
+)
+
+const (
+	maxSnapshotBytes = 1 << 20
+	maxPreviewBytes  = 2 << 20
 )
 
 // FS confines tool paths to a workspace root.
@@ -194,11 +201,23 @@ func (f *FS) writeFile(ctx context.Context, raw json.RawMessage) (Result, error)
 		return Result{}, errors.New("write_file: path is required")
 	}
 	existed := false
+	mode := os.FileMode(0o644)
+	oldContent := ""
+	track := true
 	if info, err := os.Stat(abs); err == nil {
 		if info.IsDir() {
 			return Result{}, fmt.Errorf("write_file: %s is a directory", f.Rel(abs))
 		}
 		existed = true
+		mode = info.Mode().Perm()
+		track = false
+		if info.Size() <= maxSnapshotBytes {
+			data, err := os.ReadFile(abs)
+			if err == nil && !isBinary(data) {
+				oldContent = string(data)
+				track = true
+			}
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return Result{}, fmt.Errorf("write_file: %w", err)
@@ -206,11 +225,57 @@ func (f *FS) writeFile(ctx context.Context, raw json.RawMessage) (Result, error)
 	if err := os.WriteFile(abs, []byte(a.Content), 0o644); err != nil {
 		return Result{}, fmt.Errorf("write_file: %w", err)
 	}
+	var change *Change
+	if track && len(a.Content) <= maxSnapshotBytes && !isBinary([]byte(a.Content)) {
+		change = &Change{
+			Path:    f.Rel(abs),
+			Existed: existed,
+			Mode:    uint32(mode.Perm()),
+			Old:     oldContent,
+			New:     a.Content,
+		}
+	}
 	action := "created"
 	if existed {
 		action = "updated"
 	}
-	return Result{Output: fmt.Sprintf("%s %s (%d bytes)", action, f.Rel(abs), len(a.Content))}, nil
+	return Result{Output: fmt.Sprintf("%s %s (%d bytes)", action, f.Rel(abs), len(a.Content)), Change: change}, nil
+}
+
+func (f *FS) previewWrite(ctx context.Context, raw json.RawMessage) (*Preview, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var a writeArgs
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	abs, err := f.Resolve(a.Path)
+	if err != nil {
+		return nil, err
+	}
+	rel := f.Rel(abs)
+	oldText := ""
+	if info, err := os.Stat(abs); err == nil {
+		if info.IsDir() {
+			return nil, fmt.Errorf("write_file: %s is a directory", rel)
+		}
+		if info.Size() > maxPreviewBytes {
+			return &Preview{Path: rel, Diff: fmt.Sprintf("[%s is %s; diff omitted]", rel, util.HumanBytes(int(info.Size())))}, nil
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			return nil, err
+		}
+		if isBinary(data) {
+			return &Preview{Path: rel, Diff: fmt.Sprintf("[binary file %s; content will be replaced]", rel)}, nil
+		}
+		oldText = string(data)
+	}
+	if oldText == a.Content {
+		return nil, nil
+	}
+	return &Preview{Path: rel, Diff: diff.Unified(rel, oldText, a.Content, 3)}, nil
 }
 
 type editArgs struct {
@@ -218,6 +283,44 @@ type editArgs struct {
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
 	ReplaceAll bool   `json:"replace_all"`
+}
+
+type editMatch struct {
+	oldText string
+	newText string
+	count   int
+	line    int
+	updated string
+}
+
+func matchEdit(content string, a editArgs, rel string) (editMatch, error) {
+	oldText, newText := a.OldString, a.NewString
+	count := strings.Count(content, oldText)
+	if count == 0 && strings.Contains(content, "\r\n") {
+		// The model usually emits LF; the file may use CRLF.
+		toCRLF := func(s string) string {
+			s = strings.ReplaceAll(s, "\r\n", "\n")
+			return strings.ReplaceAll(s, "\n", "\r\n")
+		}
+		candidate := toCRLF(oldText)
+		if c := strings.Count(content, candidate); c > 0 {
+			oldText, newText, count = candidate, toCRLF(newText), c
+		}
+	}
+	if count == 0 {
+		return editMatch{}, fmt.Errorf("edit_file: old_string was not found in %s. Re-read the file and match the exact text including indentation", rel)
+	}
+	if count > 1 && !a.ReplaceAll {
+		return editMatch{}, fmt.Errorf("edit_file: old_string appears %d times in %s. Add surrounding context or set replace_all=true", count, rel)
+	}
+	line := 1 + strings.Count(content[:strings.Index(content, oldText)], "\n")
+	return editMatch{
+		oldText: oldText,
+		newText: newText,
+		count:   count,
+		line:    line,
+		updated: strings.ReplaceAll(content, oldText, newText),
+	}, nil
 }
 
 func (f *FS) editFile(ctx context.Context, raw json.RawMessage) (Result, error) {
@@ -253,34 +356,72 @@ func (f *FS) editFile(ctx context.Context, raw json.RawMessage) (Result, error) 
 		return Result{}, fmt.Errorf("edit_file: %w", err)
 	}
 	content := string(contentBytes)
-
-	oldText, newText := a.OldString, a.NewString
-	count := strings.Count(content, oldText)
-	if count == 0 && strings.Contains(content, "\r\n") {
-		// The model usually emits LF; the file may use CRLF.
-		toCRLF := func(s string) string {
-			s = strings.ReplaceAll(s, "\r\n", "\n")
-			return strings.ReplaceAll(s, "\n", "\r\n")
-		}
-		candidate := toCRLF(oldText)
-		if c := strings.Count(content, candidate); c > 0 {
-			oldText, newText, count = candidate, toCRLF(newText), c
-		}
+	m, err := matchEdit(content, a, f.Rel(abs))
+	if err != nil {
+		return Result{}, err
 	}
-	if count == 0 {
-		return Result{}, fmt.Errorf("edit_file: old_string was not found in %s. Re-read the file and match the exact text including indentation", f.Rel(abs))
-	}
-	if count > 1 && !a.ReplaceAll {
-		return Result{}, fmt.Errorf("edit_file: old_string appears %d times in %s. Add surrounding context or set replace_all=true", count, f.Rel(abs))
-	}
-	line := 1 + strings.Count(content[:strings.Index(content, oldText)], "\n")
-	replacements := count
+	replacements := m.count
 	if !a.ReplaceAll {
 		replacements = 1
 	}
-	updated := strings.ReplaceAll(content, oldText, newText)
-	if err := os.WriteFile(abs, []byte(updated), info.Mode().Perm()); err != nil {
+	if err := os.WriteFile(abs, []byte(m.updated), info.Mode().Perm()); err != nil {
 		return Result{}, fmt.Errorf("edit_file: %w", err)
 	}
-	return Result{Output: fmt.Sprintf("edited %s (%d replacement(s), first at line %d)", f.Rel(abs), replacements, line)}, nil
+	var change *Change
+	if len(content) <= maxSnapshotBytes && len(m.updated) <= maxSnapshotBytes && !isBinary(contentBytes) {
+		change = &Change{
+			Path:    f.Rel(abs),
+			Existed: true,
+			Mode:    uint32(info.Mode().Perm()),
+			Old:     content,
+			New:     m.updated,
+		}
+	}
+	return Result{
+		Output: fmt.Sprintf("edited %s (%d replacement(s), first at line %d)", f.Rel(abs), replacements, m.line),
+		Change: change,
+	}, nil
+}
+
+func (f *FS) previewEdit(ctx context.Context, raw json.RawMessage) (*Preview, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var a editArgs
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	if a.OldString == "" || a.OldString == a.NewString {
+		return nil, nil
+	}
+	abs, err := f.Resolve(a.Path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() || info.Size() > maxPreviewBytes {
+		return nil, nil
+	}
+	contentBytes, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, err
+	}
+	if isBinary(contentBytes) {
+		return &Preview{Path: f.Rel(abs), Diff: fmt.Sprintf("[binary file %s; diff omitted]", f.Rel(abs))}, nil
+	}
+	m, err := matchEdit(string(contentBytes), a, f.Rel(abs))
+	if err != nil {
+		return nil, err
+	}
+	return &Preview{
+		Path: f.Rel(abs),
+		Diff: diff.Unified(f.Rel(abs), string(contentBytes), m.updated, 3),
+	}, nil
+}
+
+func isBinary(data []byte) bool {
+	return bytes.IndexByte(data, 0) >= 0
 }

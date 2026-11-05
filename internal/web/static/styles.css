@@ -700,6 +700,51 @@ a { color: var(--accent-2); }
 .approval-result.ok { color: var(--ok); }
 .approval-result.denied { color: var(--danger); }
 
+/* ---------- diffs ---------- */
+.plan-chip { cursor: pointer; font-family: var(--mono); }
+.plan-chip:hover { border-color: var(--accent-line); color: var(--text); }
+.plan-chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.diff-card {
+  margin-left: 40px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  border-radius: 12px;
+  overflow: hidden;
+  animation: rise 0.22s ease both;
+}
+.diff-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.diff-icon {
+  width: 20px; height: 20px;
+  border-radius: 6px;
+  display: grid; place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  flex: none;
+}
+.diff-path { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--text-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-badge { margin-left: auto; font-size: 10.5px; color: var(--faint); flex: none; }
+.diff-pre {
+  margin: 0;
+  padding: 8px 10px 10px;
+  max-height: 360px;
+  overflow: auto;
+  background: var(--code-bg);
+  border-top: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-dim);
+}
+.diff-line { display: block; padding: 0 4px; border-radius: 3px; }
+.diff-line.add { color: var(--ok); background: rgba(87, 217, 163, 0.07); }
+.diff-line.del { color: var(--danger); background: rgba(255, 123, 130, 0.07); }
+.diff-line.hunk { color: var(--accent-2); }
+.diff-line.meta { color: var(--faint); }
+.diff-card.nested { margin-left: 0; }
+.approval-card .diff-pre { max-height: 240px; margin: 9px 0 4px; border: 1px solid var(--border-soft); border-radius: 9px; border-top: 1px solid var(--border-soft); }
+.approval-card .approval-args { max-height: 90px; }
+
 /* ---------- subagent / notes / errors ---------- */
 .subagent-card {
   margin-left: 40px;

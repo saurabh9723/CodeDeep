@@ -108,6 +108,7 @@ func (a *Agent) summarize(ctx context.Context, msgs []llm.Message) (string, erro
 		return "", err
 	}
 	a.usage = a.usage.Add(resp.Usage)
+	a.turnUsage = a.turnUsage.Add(resp.Usage)
 	return strings.TrimSpace(resp.Message.Content), nil
 }
 

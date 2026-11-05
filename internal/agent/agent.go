@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,7 +20,12 @@ import (
 	"codedeep/internal/util"
 )
 
-const MaxSubagentDepth = 2
+const (
+	MaxSubagentDepth    = 2
+	maxCheckpoints      = 20
+	maxCheckpointBytes  = 4 << 20
+	maxDiffPreviewBytes = 64 << 10
+)
 
 var approvalCounter atomic.Int64
 
@@ -26,25 +34,36 @@ func newApprovalID() string {
 }
 
 type Options struct {
-	Config   *config.Config
-	Client   *llm.Client
-	Registry *tools.Registry
-	Sessions *session.Store
-	Approver approval.Approver
-	Emitter  Emitter
-	Depth    int
+	Config     *config.Config
+	Client     *llm.Client
+	Registry   *tools.Registry
+	FS         *tools.FS
+	Sessions   *session.Store
+	Approver   approval.Approver
+	Emitter    Emitter
+	Depth      int
+	Session    *session.Session
+	Checkpoint *session.Checkpoint
+	Approval   string
 }
 
 type Agent struct {
 	cfg       *config.Config
 	client    *llm.Client
 	reg       *tools.Registry
+	fs        *tools.FS
 	sessions  *session.Store
 	approver  approval.Approver
 	emit      Emitter
 	depth     int
+	approval  string
 	autoAllow map[string]bool
 	usage     llm.Usage
+	turnUsage llm.Usage
+
+	session    *session.Session
+	checkpoint *session.Checkpoint
+	cpMu       sync.Mutex
 }
 
 func New(opts Options) *Agent {
@@ -53,14 +72,18 @@ func New(opts Options) *Agent {
 		depth = 0
 	}
 	a := &Agent{
-		cfg:       opts.Config,
-		client:    opts.Client,
-		reg:       opts.Registry.CloneWithout("agent"),
-		sessions:  opts.Sessions,
-		approver:  opts.Approver,
-		emit:      opts.Emitter,
-		depth:     depth,
-		autoAllow: map[string]bool{},
+		cfg:        opts.Config,
+		client:     opts.Client,
+		reg:        opts.Registry.CloneWithout("agent"),
+		fs:         opts.FS,
+		sessions:   opts.Sessions,
+		approver:   opts.Approver,
+		emit:       opts.Emitter,
+		depth:      depth,
+		approval:   opts.Approval,
+		autoAllow:  map[string]bool{},
+		session:    opts.Session,
+		checkpoint: opts.Checkpoint,
 	}
 	a.registerSubagentTool()
 	return a
@@ -77,6 +100,16 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, prompt string) e
 	}
 	sess.Messages = append(sess.Messages, llm.Message{Role: "user", Content: prompt})
 	sess.Turns++
+	a.session = sess
+	a.turnUsage = llm.Usage{}
+	a.approval = a.cfg.ApprovalMode()
+	sess.Checkpoints = append(sess.Checkpoints, session.Checkpoint{
+		Turn: sess.Turns,
+		Time: time.Now().UTC(),
+	})
+	a.checkpoint = &sess.Checkpoints[len(sess.Checkpoints)-1]
+	defer a.finishCheckpoint(sess)
+
 	a.emit.Emit(Event{Type: EventUser, SessionID: sess.ID, Text: prompt})
 	a.save(sess)
 
@@ -84,14 +117,8 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, prompt string) e
 	_, err := a.runLoop(ctx, &sess.Messages, system, sess, a.cfg.MaxSteps)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			a.emit.Emit(Event{
-				Type:       EventDone,
-				SessionID:  sess.ID,
-				Depth:      a.depth,
-				Message:    "stopped",
-				Usage:      &a.usage,
-				TotalUsage: &sess.Usage,
-			})
+			ev := a.doneEvent(sess, "stopped")
+			a.emit.Emit(ev)
 		} else {
 			a.emit.Emit(Event{Type: EventError, SessionID: sess.ID, Depth: a.depth, Message: err.Error()})
 		}
@@ -99,13 +126,7 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, prompt string) e
 		return err
 	}
 	a.save(sess)
-	a.emit.Emit(Event{
-		Type:       EventDone,
-		SessionID:  sess.ID,
-		Depth:      a.depth,
-		Usage:      &a.usage,
-		TotalUsage: &sess.Usage,
-	})
+	a.emit.Emit(a.doneEvent(sess, ""))
 	return nil
 }
 
@@ -172,15 +193,19 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 			}
 		}
 		a.usage = a.usage.Add(usage)
+		a.turnUsage = a.turnUsage.Add(usage)
 		if sess != nil {
 			sess.Usage = sess.Usage.Add(usage)
 		}
+		total := a.totalUsage(sess)
 		a.emit.Emit(Event{
 			Type:       EventUsage,
 			SessionID:  sessionID(sess),
 			Depth:      a.depth,
 			Usage:      &usage,
-			TotalUsage: a.totalUsage(sess),
+			TotalUsage: total,
+			CostUSD:    a.costOf(usage),
+			TotalCost:  a.costOf(*total),
 		})
 
 		assistant := resp.Message
@@ -276,12 +301,28 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 		return finish(fmt.Sprintf("Error: unknown tool %q. Available tools: %s", name, a.toolNames()), true)
 	}
 
-	decision, err := a.decide(ctx, spec, tc, sess)
+	preview := a.previewTool(ctx, spec, raw)
+	if preview != nil {
+		a.emit.Emit(Event{
+			Type:      EventDiff,
+			SessionID: sessionID(sess),
+			Depth:     a.depth,
+			Name:      name,
+			Path:      preview.Path,
+			Diff:      util.TruncateMiddle(preview.Diff, maxDiffPreviewBytes),
+			CallID:    tc.ID,
+		})
+	}
+
+	decision, err := a.decide(ctx, spec, tc, sess, preview)
 	if err != nil {
 		return finish("Error: approval failed: "+err.Error(), true)
 	}
 	if decision == approval.Deny {
-		if a.cfg.Approval == "readonly" {
+		switch a.approval {
+		case "plan":
+			return finish("Error: "+name+" is blocked by plan mode. Use read-only tools to investigate and present a plan instead.", true)
+		case "readonly":
 			return finish("Error: "+name+" is blocked by read-only approval mode. Do not retry.", true)
 		}
 		return finish("Error: permission denied for "+name+". Do not retry this call; change approach or explain what you need.", true)
@@ -291,17 +332,35 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 	if runErr != nil {
 		return finish("Error: "+runErr.Error(), true)
 	}
+	if result.Change != nil {
+		a.recordChange(result.Change)
+	}
 	return finish(result.Output, result.IsError)
 }
 
-func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, sess *session.Session) (approval.Decision, error) {
+func (a *Agent) previewTool(ctx context.Context, spec *tools.Spec, raw json.RawMessage) *tools.Preview {
+	if spec == nil || spec.Preview == nil {
+		return nil
+	}
+	switch a.approval {
+	case "readonly", "plan":
+		return nil
+	}
+	p, err := spec.Preview(ctx, raw)
+	if err != nil || p == nil || strings.TrimSpace(p.Diff) == "" {
+		return nil
+	}
+	return p
+}
+
+func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, sess *session.Session, preview *tools.Preview) (approval.Decision, error) {
 	if spec.ReadOnly {
 		return approval.AllowOnce, nil
 	}
-	switch a.cfg.Approval {
+	switch a.approval {
 	case "auto":
 		return approval.AllowOnce, nil
-	case "readonly":
+	case "readonly", "plan":
 		return approval.Deny, nil
 	}
 	if a.autoAllow[spec.Name] {
@@ -317,6 +376,10 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 		ReadOnly: spec.ReadOnly,
 		Depth:    a.depth,
 	}
+	if preview != nil {
+		req.Path = preview.Path
+		req.Diff = util.TruncateMiddle(preview.Diff, maxDiffPreviewBytes)
+	}
 	a.emit.Emit(Event{
 		Type:       EventApproval,
 		SessionID:  sessionID(sess),
@@ -325,6 +388,8 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 		Name:       spec.Name,
 		Args:       req.Args,
 		ReadOnly:   spec.ReadOnly,
+		Path:       req.Path,
+		Diff:       req.Diff,
 	})
 	dec, err := a.approver.Approve(ctx, req)
 	if err != nil {
@@ -360,6 +425,154 @@ func (a *Agent) toolNames() string {
 		names = append(names, s.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+func (a *Agent) recordChange(ch *tools.Change) {
+	if ch == nil {
+		return
+	}
+	a.cpMu.Lock()
+	cp := a.checkpoint
+	if cp == nil {
+		a.cpMu.Unlock()
+		return
+	}
+	for _, f := range cp.Files {
+		if f.Path == ch.Path {
+			a.cpMu.Unlock()
+			return
+		}
+	}
+	size := 0
+	for _, f := range cp.Files {
+		size += len(f.Content)
+	}
+	if size+len(ch.Old) > maxCheckpointBytes {
+		a.cpMu.Unlock()
+		return
+	}
+	cp.Files = append(cp.Files, session.FileSnapshot{
+		Path:    ch.Path,
+		Existed: ch.Existed,
+		Mode:    ch.Mode,
+		Content: ch.Old,
+	})
+	sess := a.session
+	a.cpMu.Unlock()
+	if sess != nil {
+		a.save(sess)
+	}
+}
+
+func (a *Agent) finishCheckpoint(sess *session.Session) {
+	a.cpMu.Lock()
+	cp := a.checkpoint
+	a.checkpoint = nil
+	a.cpMu.Unlock()
+	a.session = nil
+	if sess == nil || cp == nil {
+		return
+	}
+	if len(cp.Files) == 0 {
+		for i := len(sess.Checkpoints) - 1; i >= 0; i-- {
+			if &sess.Checkpoints[i] == cp {
+				sess.Checkpoints = append(sess.Checkpoints[:i], sess.Checkpoints[i+1:]...)
+				break
+			}
+		}
+	}
+	if len(sess.Checkpoints) > maxCheckpoints {
+		sess.Checkpoints = append([]session.Checkpoint(nil), sess.Checkpoints[len(sess.Checkpoints)-maxCheckpoints:]...)
+	}
+	a.save(sess)
+}
+
+// Undo restores the files captured by the most recent checkpoint and drops the
+// checkpoint. It returns the restored workspace-relative paths.
+func (a *Agent) Undo(sess *session.Session) ([]string, error) {
+	if sess == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if len(sess.Checkpoints) == 0 {
+		return nil, fmt.Errorf("nothing to undo")
+	}
+	cp := sess.Checkpoints[len(sess.Checkpoints)-1]
+	if len(cp.Files) == 0 {
+		sess.Checkpoints = sess.Checkpoints[:len(sess.Checkpoints)-1]
+		a.save(sess)
+		return nil, fmt.Errorf("nothing to undo")
+	}
+
+	restored := make([]string, 0, len(cp.Files))
+	var errs []error
+	for i := len(cp.Files) - 1; i >= 0; i-- {
+		f := cp.Files[i]
+		abs := f.Path
+		if a.fs != nil {
+			resolved, err := a.fs.Resolve(f.Path)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			abs = resolved
+		} else {
+			abs = filepath.Join(a.cfg.WorkDir, filepath.FromSlash(f.Path))
+		}
+		if !f.Existed {
+			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove %s: %w", f.Path, err))
+				continue
+			}
+			restored = append(restored, f.Path)
+			continue
+		}
+		mode := os.FileMode(f.Mode)
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", f.Path, err))
+			continue
+		}
+		if err := os.WriteFile(abs, []byte(f.Content), mode); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", f.Path, err))
+			continue
+		}
+		restored = append(restored, f.Path)
+	}
+
+	sess.Checkpoints = sess.Checkpoints[:len(sess.Checkpoints)-1]
+	a.save(sess)
+	if len(errs) > 0 {
+		return restored, errors.Join(errs...)
+	}
+	return restored, nil
+}
+
+func (a *Agent) costOf(u llm.Usage) float64 {
+	cost, ok := a.cfg.UsageCost(u)
+	if !ok {
+		return 0
+	}
+	return cost
+}
+
+func (a *Agent) doneEvent(sess *session.Session, message string) Event {
+	total := a.totalUsage(sess)
+	ev := Event{
+		Type:       EventDone,
+		SessionID:  sessionID(sess),
+		Depth:      a.depth,
+		Message:    message,
+		Usage:      &a.usage,
+		TotalUsage: total,
+		CostUSD:    a.costOf(a.turnUsage),
+		TotalCost:  a.costOf(*total),
+	}
+	if sess != nil {
+		ev.Checkpoints = len(sess.Checkpoints)
+	}
+	return ev
 }
 
 func (a *Agent) save(sess *session.Session) {

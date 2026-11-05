@@ -55,13 +55,17 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 	})
 
 	child := New(Options{
-		Config:   a.cfg,
-		Client:   a.client,
-		Registry: a.reg,
-		Sessions: a.sessions,
-		Approver: a.approver,
-		Emitter:  a.emit,
-		Depth:    depth,
+		Config:     a.cfg,
+		Client:     a.client,
+		Registry:   a.reg,
+		FS:         a.fs,
+		Sessions:   a.sessions,
+		Approver:   a.approver,
+		Emitter:    a.emit,
+		Depth:      depth,
+		Session:    a.session,
+		Checkpoint: a.checkpoint,
+		Approval:   a.approval,
 	})
 	system := BuildSystemPrompt(a.cfg, depth)
 	msgs := []llm.Message{{Role: "user", Content: args.Prompt}}
@@ -72,6 +76,10 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 	}
 	text, err := child.runLoop(ctx, &msgs, system, nil, maxSteps)
 	a.usage = a.usage.Add(child.usage)
+	a.turnUsage = a.turnUsage.Add(child.usage)
+	if a.session != nil {
+		a.session.Usage = a.session.Usage.Add(child.usage)
+	}
 
 	isErr := err != nil
 	report := text

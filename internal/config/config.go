@@ -7,7 +7,18 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+
+	"codedeep/internal/llm"
 )
+
+// Price is an optional per-model price in USD per million tokens. When it is
+// configured the agent reports estimated costs alongside token counts.
+type Price struct {
+	InputPerMTok    float64 `json:"input_per_mtok"`
+	OutputPerMTok   float64 `json:"output_per_mtok"`
+	CacheHitPerMTok float64 `json:"cache_hit_per_mtok,omitempty"`
+}
 
 type MCPServer struct {
 	Command    string            `json:"command"`
@@ -35,8 +46,26 @@ type Config struct {
 	Debug            bool                 `json:"debug"`
 	MCPServers       map[string]MCPServer `json:"mcp_servers"`
 	InstructionFiles []string             `json:"instruction_files"`
+	Pricing          map[string]Price     `json:"pricing,omitempty"`
 	ConfigPath       string               `json:"-"`
 	Home             string               `json:"-"`
+
+	approvalMu sync.RWMutex
+}
+
+// ApprovalMode returns the current approval mode. The mode can be changed at
+// runtime from the web UI, so readers must use this instead of the field.
+func (c *Config) ApprovalMode() string {
+	c.approvalMu.RLock()
+	defer c.approvalMu.RUnlock()
+	return c.Approval
+}
+
+// SetApproval changes the approval mode at runtime.
+func (c *Config) SetApproval(mode string) {
+	c.approvalMu.Lock()
+	defer c.approvalMu.Unlock()
+	c.Approval = mode
 }
 
 func Default() *Config {
@@ -214,7 +243,7 @@ func parseBool(s string) bool {
 func (c *Config) normalize() {
 	c.Approval = strings.ToLower(strings.TrimSpace(c.Approval))
 	switch c.Approval {
-	case "auto", "readonly":
+	case "auto", "readonly", "plan":
 	default:
 		c.Approval = "ask"
 	}
@@ -256,3 +285,28 @@ func (c *Config) normalize() {
 
 // APIKeyPresent reports whether a key is configured, regardless of validity.
 func (c *Config) APIKeyPresent() bool { return strings.TrimSpace(c.APIKey) != "" }
+
+// UsageCost estimates the USD cost of a usage record for the current model.
+// The boolean is false when no pricing is configured for the model.
+func (c *Config) UsageCost(u llm.Usage) (float64, bool) {
+	p, ok := c.Pricing[c.Model]
+	if !ok || (p.InputPerMTok == 0 && p.OutputPerMTok == 0) {
+		return 0, false
+	}
+	cache := u.PromptCacheHitTokens
+	if cache < 0 {
+		cache = 0
+	}
+	if cache > u.PromptTokens {
+		cache = u.PromptTokens
+	}
+	miss := u.PromptTokens - cache
+	cost := float64(miss)*p.InputPerMTok/1e6 +
+		float64(u.CompletionTokens)*p.OutputPerMTok/1e6
+	if p.CacheHitPerMTok > 0 {
+		cost += float64(cache) * p.CacheHitPerMTok / 1e6
+	} else {
+		cost += float64(cache) * p.InputPerMTok / 1e6
+	}
+	return cost, true
+}

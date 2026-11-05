@@ -1,10 +1,13 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"codedeep/internal/llm"
 )
 
 var configEnvVars = []string{
@@ -241,5 +244,98 @@ func TestConfigPathRecording(t *testing.T) {
 	}
 	if cfg.ConfigPath != p {
 		t.Errorf("ConfigPath = %q, want %q", cfg.ConfigPath, p)
+	}
+}
+
+func TestUsageCostWithoutPricing(t *testing.T) {
+	cfg := &Config{Model: "m"}
+	if _, ok := cfg.UsageCost(llm.Usage{PromptTokens: 100}); ok {
+		t.Fatal("cost should be unavailable without pricing")
+	}
+
+	cfg.Pricing = map[string]Price{"other": {InputPerMTok: 1}}
+	if _, ok := cfg.UsageCost(llm.Usage{PromptTokens: 100}); ok {
+		t.Fatal("cost should be unavailable for an unpriced model")
+	}
+}
+
+func TestUsageCostInputAndOutput(t *testing.T) {
+	cfg := &Config{
+		Model: "m",
+		Pricing: map[string]Price{
+			"m": {InputPerMTok: 2, OutputPerMTok: 8},
+		},
+	}
+	cost, ok := cfg.UsageCost(llm.Usage{
+		PromptTokens:     1_000_000,
+		CompletionTokens: 500_000,
+	})
+	if !ok {
+		t.Fatal("expected a cost")
+	}
+	if math.Abs(cost-6) > 1e-9 {
+		t.Errorf("cost = %v, want 6", cost)
+	}
+}
+
+func TestUsageCostCacheHit(t *testing.T) {
+	cfg := &Config{
+		Model: "m",
+		Pricing: map[string]Price{
+			"m": {InputPerMTok: 2, OutputPerMTok: 8, CacheHitPerMTok: 0.5},
+		},
+	}
+	cost, _ := cfg.UsageCost(llm.Usage{
+		PromptTokens:         1_000_000,
+		PromptCacheHitTokens: 400_000,
+	})
+	if math.Abs(cost-1.4) > 1e-9 {
+		t.Errorf("cost = %v, want 1.4", cost)
+	}
+
+	// Without a cache price, cached tokens are billed at the input rate.
+	cfg.Pricing["m"] = Price{InputPerMTok: 2, OutputPerMTok: 8}
+	cost, _ = cfg.UsageCost(llm.Usage{
+		PromptTokens:         1_000_000,
+		PromptCacheHitTokens: 400_000,
+	})
+	if math.Abs(cost-2) > 1e-9 {
+		t.Errorf("cost without cache price = %v, want 2", cost)
+	}
+}
+
+func TestUsageCostClampsCacheHits(t *testing.T) {
+	cfg := &Config{
+		Model: "m",
+		Pricing: map[string]Price{
+			"m": {InputPerMTok: 1, OutputPerMTok: 1},
+		},
+	}
+	cost, _ := cfg.UsageCost(llm.Usage{
+		PromptTokens:         100,
+		PromptCacheHitTokens: 500,
+	})
+	if math.Abs(cost-0.0001) > 1e-12 {
+		t.Errorf("cost = %v, want 0.0001", cost)
+	}
+}
+
+func TestPlanApprovalMode(t *testing.T) {
+	cfg := loadFrom(t, `{"approval": "PLAN"}`)
+	if cfg.Approval != "plan" {
+		t.Fatalf("approval = %q, want plan", cfg.Approval)
+	}
+}
+
+func TestPricingFile(t *testing.T) {
+	cfg := loadFrom(t, `{
+		"model": "priced",
+		"pricing": {
+			"priced": {"input_per_mtok": 0.27, "output_per_mtok": 1.1, "cache_hit_per_mtok": 0.07}
+		}
+	}`)
+	p, ok := cfg.Pricing["priced"]
+	if !ok || p.InputPerMTok != 0.27 || p.OutputPerMTok != 1.1 || p.CacheHitPerMTok != 0.07 {
+		t.Fatalf("pricing = %+v", cfg.Pricing)
 	}
 }

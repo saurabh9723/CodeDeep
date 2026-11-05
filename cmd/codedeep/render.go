@@ -212,6 +212,17 @@ func (r *renderer) Emit(ev agent.Event) {
 			r.ensureNL()
 		}
 
+	case agent.EventDiff:
+		r.ensureNL()
+		r.inReasoning = false
+		label := r.p.cyan("diff")
+		if ev.Path != "" {
+			label += " " + r.p.bold(ev.Path)
+		}
+		fmt.Fprintf(r.out, "%s%s\n", r.depthPrefix(ev.Depth), label)
+		r.printDiff(ev.Diff, ev.Depth)
+		r.atLineStart = true
+
 	case agent.EventCompact:
 		r.ensureNL()
 		fmt.Fprintf(r.out, "%s %s\n", r.p.yellow("compacted"), r.p.dim(ev.Message))
@@ -261,6 +272,9 @@ func (r *renderer) Emit(ev agent.Event) {
 		if r.turnUsage.TotalTokens > 0 {
 			parts = append(parts, humanTokens(r.turnUsage.TotalTokens)+" tokens")
 		}
+		if cost := humanCost(ev.CostUSD); cost != "" {
+			parts = append(parts, cost)
+		}
 		if ev.Message != "" {
 			parts = append(parts, ev.Message)
 		}
@@ -273,6 +287,45 @@ func (r *renderer) Emit(ev agent.Event) {
 	}
 
 	r.out.Flush()
+}
+
+func (r *renderer) printDiff(text string, depth int) {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	const maxLines = 160
+	prefix := r.depthPrefix(depth) + "  "
+	for i, line := range lines {
+		if i >= maxLines {
+			fmt.Fprintf(r.out, "%s%s\n", prefix, r.p.dim(fmt.Sprintf("… %d more lines", len(lines)-maxLines)))
+			break
+		}
+		switch {
+		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+			line = r.p.dim(line)
+		case strings.HasPrefix(line, "@@"):
+			line = r.p.cyan(line)
+		case strings.HasPrefix(line, "+"):
+			line = r.p.green(line)
+		case strings.HasPrefix(line, "-"):
+			line = r.p.red(line)
+		case strings.HasPrefix(line, "["):
+			line = r.p.dim(line)
+		}
+		fmt.Fprintf(r.out, "%s%s\n", prefix, line)
+	}
+}
+
+func humanCost(usd float64) string {
+	if usd <= 0 {
+		return ""
+	}
+	switch {
+	case usd < 0.01:
+		return fmt.Sprintf("~$%.4f", usd)
+	case usd < 1:
+		return fmt.Sprintf("~$%.3f", usd)
+	default:
+		return fmt.Sprintf("~$%.2f", usd)
+	}
 }
 
 func outputSummary(ev agent.Event) string {

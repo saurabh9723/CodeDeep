@@ -17,8 +17,14 @@ case "$(uname -s)" in
 esac
 
 PORT=${PORT:-18080}
+WEBPORT=${WEBPORT:-18081}
 MOCK_PID=""
+WEB_PID=""
 cleanup() {
+  if [ -n "$WEB_PID" ]; then
+    kill "$WEB_PID" 2>/dev/null || true
+    wait "$WEB_PID" 2>/dev/null || true
+  fi
   if [ -n "$MOCK_PID" ]; then
     kill "$MOCK_PID" 2>/dev/null || true
     wait "$MOCK_PID" 2>/dev/null || true
@@ -57,6 +63,8 @@ CODEAGENT_APPROVAL=auto \
 "$TMP/codedeep$EXT" -cwd "$TMP/work" -p "write a demo file" -plain >"$TMP/out.txt"
 
 grep -q "created mock-output.txt" "$TMP/out.txt"
+grep -q "diff mock-output.txt" "$TMP/out.txt"
+grep -q '+written by the mock model' "$TMP/out.txt"
 test -f "$TMP/work/mock-output.txt"
 grep -q "written by the mock model" "$TMP/work/mock-output.txt"
 
@@ -64,5 +72,57 @@ if ! compgen -G "$TMP/sessions/*.json" >/dev/null; then
   echo "no session file was persisted" >&2
   exit 1
 fi
+SESS_FILE=$(ls "$TMP"/sessions/*.json | head -n 1)
+SID=$(basename "$SESS_FILE" .json)
+grep -q '"checkpoints"' "$SESS_FILE"
+grep -q 'mock-output.txt' "$SESS_FILE"
+
+# Plan mode must refuse the write and leave the workspace untouched.
+mkdir -p "$TMP/plan-work" "$TMP/plan-sessions"
+DEEPSEEK_API_KEY=test \
+CODEAGENT_BASE_URL="http://127.0.0.1:$PORT" \
+CODEAGENT_SESSIONS_DIR="$TMP/plan-sessions" \
+"$TMP/codedeep$EXT" -cwd "$TMP/plan-work" -plan -p "write a demo file" -plain >"$TMP/plan.txt"
+grep -q "blocked by plan mode" "$TMP/plan.txt"
+test ! -f "$TMP/plan-work/mock-output.txt"
+
+# The web API exposes bootstrap state, the plan toggle, and undo.
+DEEPSEEK_API_KEY=test \
+CODEAGENT_BASE_URL="http://127.0.0.1:$PORT" \
+CODEAGENT_SESSIONS_DIR="$TMP/sessions" \
+CODEAGENT_APPROVAL=auto \
+"$TMP/codedeep$EXT" serve -addr "127.0.0.1:$WEBPORT" -no-open -cwd "$TMP/work" >"$TMP/web.log" 2>&1 &
+WEB_PID=$!
+
+web_ready=0
+for _ in $(seq 1 50); do
+  if curl -fsS "http://127.0.0.1:$WEBPORT/api/health" >/dev/null 2>&1; then
+    web_ready=1
+    break
+  fi
+  sleep 0.2
+done
+if [ "$web_ready" -ne 1 ]; then
+  echo "web server did not start:" >&2
+  cat "$TMP/web.log" >&2
+  exit 1
+fi
+
+curl -fsS "http://127.0.0.1:$WEBPORT/api/bootstrap" >"$TMP/boot.json"
+grep -q '"approval":"auto"' "$TMP/boot.json"
+grep -q '"plan":false' "$TMP/boot.json"
+
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"enabled":true}' "http://127.0.0.1:$WEBPORT/api/plan" >"$TMP/plan-on.json"
+grep -q '"plan":true' "$TMP/plan-on.json"
+
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' "http://127.0.0.1:$WEBPORT/api/plan" >"$TMP/plan-off.json"
+grep -q '"plan":false' "$TMP/plan-off.json"
+
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d "{\"session_id\":\"$SID\"}" "http://127.0.0.1:$WEBPORT/api/undo" >"$TMP/undo.json"
+grep -q '"reverted":\["mock-output.txt"\]' "$TMP/undo.json"
+test ! -f "$TMP/work/mock-output.txt"
 
 echo "e2e smoke passed"

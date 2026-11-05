@@ -24,8 +24,9 @@ type Server struct {
 	App *app.App
 	hub *approvalHub
 
-	mu     sync.Mutex
-	active map[string]bool
+	mu           sync.Mutex
+	active       map[string]bool
+	prevApproval string
 }
 
 func New(a *app.App) *Server {
@@ -53,6 +54,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
 	mux.HandleFunc("POST /api/approve", s.handleApprove)
+	mux.HandleFunc("POST /api/undo", s.handleUndo)
+	mux.HandleFunc("POST /api/plan", s.handlePlan)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	return withHeaders(mux)
 }
@@ -104,11 +107,12 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tools {
 		infos = append(infos, toolInfo{Name: t.Name, Description: t.Description, ReadOnly: t.ReadOnly})
 	}
+	approval := s.App.Cfg.ApprovalMode()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"model":           s.App.Cfg.Model,
 		"base_url":        s.App.Cfg.BaseURL,
 		"workspace":       s.App.Cfg.WorkDir,
-		"approval":        s.App.Cfg.Approval,
+		"approval":        approval,
 		"api_key_present": s.App.Cfg.APIKeyPresent(),
 		"tools":           infos,
 		"sessions":        metas,
@@ -116,6 +120,8 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"version":         "0.1.0",
 		"compact_at":      s.App.Cfg.CompactAt,
 		"context_window":  s.App.Cfg.ContextWindow,
+		"plan":            approval == "plan",
+		"pricing":         s.App.Cfg.Pricing,
 	})
 }
 
@@ -277,6 +283,69 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.resolve(req.ID, decision)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	sess, err := s.App.Sessions.Load(req.SessionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !s.acquire(sess.ID) {
+		writeError(w, http.StatusConflict, "a run is already active for this session")
+		return
+	}
+	defer s.release(sess.ID)
+
+	ag := s.App.NewAgent(approval.DenyAll, nil)
+	files, err := ag.Undo(sess)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "reverted": files})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reverted": files})
+}
+
+func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	s.mu.Lock()
+	if req.Enabled {
+		if current := s.App.Cfg.ApprovalMode(); current != "plan" {
+			s.prevApproval = current
+		}
+		s.App.Cfg.SetApproval("plan")
+	} else {
+		mode := s.prevApproval
+		if mode == "" || mode == "plan" {
+			mode = "ask"
+		}
+		s.App.Cfg.SetApproval(mode)
+	}
+	approvalMode := s.App.Cfg.ApprovalMode()
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"approval": approvalMode,
+		"plan":     approvalMode == "plan",
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

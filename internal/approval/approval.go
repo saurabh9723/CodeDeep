@@ -30,6 +30,8 @@ type Request struct {
 	Args     json.RawMessage
 	ReadOnly bool
 	Depth    int
+	Path     string
+	Diff     string
 }
 
 type Approver interface {

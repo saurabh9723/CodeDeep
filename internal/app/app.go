@@ -74,6 +74,7 @@ func (a *App) NewAgent(approver approval.Approver, emit agent.Emitter) *agent.Ag
 		Config:   a.Cfg,
 		Client:   a.Client,
 		Registry: a.Registry,
+		FS:       a.FS,
 		Sessions: a.Sessions,
 		Approver: approver,
 		Emitter:  emit,

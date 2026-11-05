@@ -62,10 +62,14 @@
           <div class="chips">
             <span class="chip" id="modelChip">deepseek-chat</span>
             <span class="chip subtle" id="approvalChip">ask mode</span>
+            <button class="chip subtle plan-chip" id="planChip" type="button" title="Toggle plan mode">plan off</button>
             <span class="chip subtle" id="usageChip" hidden>0 tokens</span>
           </div>
         </div>
         <div class="top-actions">
+          <button class="icon-btn" id="undoBtn" title="Revert files from the last turn" aria-label="Undo last turn" hidden>
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-1"/></svg>
+          </button>
           <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
           </button>

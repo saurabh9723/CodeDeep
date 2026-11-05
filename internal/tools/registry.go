@@ -13,6 +13,25 @@ import (
 type Result struct {
 	Output  string
 	IsError bool
+	// Change describes the file mutation performed by the tool, when the tool
+	// can describe it without re-reading the file. The agent uses it to build
+	// undo checkpoints.
+	Change *Change
+}
+
+// Change records the state of a file before and after a mutation.
+type Change struct {
+	Path    string
+	Existed bool
+	Mode    uint32
+	Old     string
+	New     string
+}
+
+// Preview describes an upcoming mutation without applying it.
+type Preview struct {
+	Path string
+	Diff string
 }
 
 type Spec struct {
@@ -20,6 +39,7 @@ type Spec struct {
 	Description string
 	Params      json.RawMessage
 	ReadOnly    bool
+	Preview     func(ctx context.Context, args json.RawMessage) (*Preview, error)
 	Run         func(ctx context.Context, args json.RawMessage) (Result, error)
 }
 

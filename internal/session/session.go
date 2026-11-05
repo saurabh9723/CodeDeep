@@ -18,15 +18,33 @@ import (
 )
 
 type Session struct {
-	ID       string        `json:"id"`
-	Title    string        `json:"title"`
-	Model    string        `json:"model"`
-	Cwd      string        `json:"cwd"`
-	Created  time.Time     `json:"created"`
-	Updated  time.Time     `json:"updated"`
-	Messages []llm.Message `json:"messages"`
-	Usage    llm.Usage     `json:"usage"`
-	Turns    int           `json:"turns"`
+	ID          string        `json:"id"`
+	Title       string        `json:"title"`
+	Model       string        `json:"model"`
+	Cwd         string        `json:"cwd"`
+	Created     time.Time     `json:"created"`
+	Updated     time.Time     `json:"updated"`
+	Messages    []llm.Message `json:"messages"`
+	Usage       llm.Usage     `json:"usage"`
+	Turns       int           `json:"turns"`
+	Checkpoints []Checkpoint  `json:"checkpoints,omitempty"`
+}
+
+// Checkpoint is the pre-turn state of every file a turn mutated. Undo restores
+// the snapshots from the most recent checkpoint.
+type Checkpoint struct {
+	Turn  int            `json:"turn"`
+	Time  time.Time      `json:"time"`
+	Files []FileSnapshot `json:"files"`
+}
+
+// FileSnapshot is a file's content before the turn touched it. Existed is
+// false when the turn created the file, in which case undo removes it.
+type FileSnapshot struct {
+	Path    string `json:"path"`
+	Existed bool   `json:"existed"`
+	Mode    uint32 `json:"mode,omitempty"`
+	Content string `json:"content,omitempty"`
 }
 
 type Meta struct {

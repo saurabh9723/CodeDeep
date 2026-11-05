@@ -14,16 +14,28 @@ the browser.
   for approval, feeds results back, and repeats until the task is done.
 - **Coding tools** — `read_file`, `write_file`, `edit_file`, `glob`, `grep`,
   `bash`, and `agent` for subagents.
-- **Approvals** — `ask` (default), `auto`, or `readonly`; read-only tools are
-  never prompted, and "always allow" is remembered per tool for the session.
+- **Diff previews and undo** — `write_file` and `edit_file` show a unified diff
+  before they run, including in the approval prompt. Every turn snapshots the
+  files it touches, so `/undo` (or the web undo button) restores the previous
+  contents or removes files that were created.
+- **Plan mode** — a read-only mode that blocks mutations and asks the model to
+  produce a concrete plan. Switch to another mode to execute it.
+- **Git awareness** — read-only `git_status` and `git_diff` tools, plus the
+  current branch and uncommitted-change count in the system prompt.
+- **Approvals** — `ask` (default), `auto`, `readonly`, or `plan`; read-only
+  tools are never prompted, and "always allow" is remembered per tool for the
+  session.
 - **Context management** — automatic compaction at 80% of the context window
   with a boundary-safe cut, plus `/compact` on demand.
-- **Subagents** — isolated history, shared approvals, nested up to two levels.
+- **Subagents** — isolated history, shared approvals and checkpoints, nested up
+  to two levels; their token usage counts toward the session.
+- **Cost estimates** — optional per-model pricing in the config; the CLI and
+  web UI show token totals and estimated USD per step, turn, and session.
 - **MCP** — starts stdio JSON-RPC servers and exposes their tools as
   `mcp__<server>__<tool>`; `readOnlyHint` tools skip approval.
 - **Sessions** — saved after every step, resumable from the CLI or the web UI.
 - **Web UI** — Qoder-style interface served from the same binary, no Node or
-  Electron required.
+  Electron required. Includes diff cards, a plan-mode toggle, and undo.
 - **Confinement** — tool paths stay inside the workspace, including symlink
   checks; binary files and build directories are skipped by search tools.
 
@@ -64,8 +76,8 @@ echo "summarize the last commit" | ./bin/codedeep -p -
 ```
 
 REPL commands: `/help`, `/new`, `/sessions`, `/resume <id|#>`, `/title`,
-`/model`, `/models`, `/approval`, `/reasoning`, `/status`, `/tools`,
-`/compact`, `/clear`, `/quit`.
+`/model`, `/models`, `/approval`, `/plan [on|off]`, `/undo`, `/reasoning`,
+`/status`, `/tools`, `/compact`, `/clear`, `/quit`.
 
 ### Web UI
 
@@ -90,7 +102,8 @@ REPL commands: `/help`, `/new`, `/sessions`, `/resume <id|#>`, `/title`,
 - `-config PATH` — config file (default `~/.codedeep/config.json`).
 - `-cwd DIR` — workspace directory (default: current directory).
 - `-m`, `-model NAME` — model name.
-- `-approval MODE` — `ask`, `auto`, or `readonly`.
+- `-approval MODE` — `ask`, `auto`, `readonly`, or `plan`.
+- `-plan` — shorthand for `-approval plan` (read-only investigation).
 - `-y`, `-yes` — shorthand for `-approval auto`.
 - `-debug` — verbose logging to stderr.
 
@@ -116,9 +129,22 @@ config file is fine. See [`config.example.json`](config.example.json).
   "shell": "",
   "web_addr": "127.0.0.1:7777",
   "allow_outside": false,
-  "mcp_servers": {}
+  "mcp_servers": {},
+  "pricing": {
+    "deepseek-chat": {
+      "input_per_mtok": 0.27,
+      "output_per_mtok": 1.1,
+      "cache_hit_per_mtok": 0.07
+    }
+  }
 }
 ```
+
+`pricing` is optional. Its keys are model names; values are USD per million
+tokens. When a model has a price entry, `/status` and the web header show an
+estimated cost alongside token counts. Cached prompt tokens use
+`cache_hit_per_mtok` when set, otherwise the normal input rate. Prices change,
+so check your provider's current rates.
 
 Prefer environment variables over storing keys in files:
 
@@ -159,17 +185,27 @@ Built-in tools:
 - `glob` — `*`, `?`, `[...]`, and `**` patterns.
 - `grep` — RE2 search with an optional file filter and case-insensitive mode.
 - `bash` — shell command with timeout and combined stdout/stderr.
+- `git_status` — branch, upstream state, last commit, and changed files.
+- `git_diff` — unified diff of uncommitted changes; supports `staged`, `stat`,
+  `path`, and `context`.
 - `agent` — delegate a self-contained task to a subagent.
 
 `glob` and `grep` skip `.git`, `node_modules`, `vendor`, `dist`, `build`,
-virtualenvs, caches, and other generated directories. Three tools are read-only
-and never prompt: `read_file`, `glob`, `grep`. Everything else follows the
-approval mode:
+virtualenvs, caches, and other generated directories. Five tools are read-only
+and never prompt: `read_file`, `glob`, `grep`, `git_status`, and `git_diff`.
+Everything else follows the approval mode:
 
 - `ask` — prompt before each mutating tool call; choose allow once, always
-  allow, or deny.
+  allow, or deny. When the call has a preview, the prompt includes the diff.
 - `auto` — run mutating tools without prompting.
 - `readonly` — deny every mutating tool.
+- `plan` — investigate with read-only tools, allow no mutations, and produce a
+  concrete plan for a later run.
+
+Each turn records a checkpoint of the pre-change contents of every file that
+`write_file` or `edit_file` touches (up to 1 MB per file). `/undo` restores the
+most recent checkpoint and removes files that did not exist before the turn.
+The last 20 checkpoints are kept with the session.
 
 ## MCP servers
 
@@ -209,9 +245,11 @@ go test ./...            # unit and integration tests
 go vet ./...
 ```
 
-The tests cover glob matching and file tools, workspace confinement, session
-persistence and titles, config precedence, the full agent loop against a fake
-SSE provider, approval paths, and compaction boundaries.
+The tests cover glob matching and file tools, workspace confinement and diff
+previews, checkpoint/undo behavior, plan mode, git tools in and out of a
+repository, pricing math, session persistence and titles, config precedence,
+the full agent loop against a fake SSE provider, approval paths, and compaction
+boundaries.
 
 End-to-end smoke test (builds the binaries, starts the deterministic mock model,
 runs a real tool turn, and checks the written file):
@@ -255,18 +293,20 @@ cmd/codedeep      CLI, REPL, renderer, web launcher
 cmd/mockllm       deterministic OpenAI-compatible test provider
 cmd/mockmcp       deterministic stdio MCP server
 internal/app      wiring: config, client, registry, sessions, MCP
-internal/agent    loop, compaction, subagents, system prompt, events
+internal/agent    loop, compaction, subagents, system prompt, checkpoints, events
 internal/llm      OpenAI-compatible streaming client
-internal/tools    registry plus file, search, and shell tools
+internal/diff     unified diff engine for previews
+internal/tools    registry plus file, search, shell, and git tools
 internal/mcp      stdio JSON-RPC client and tool registration
-internal/session  atomic JSON session store
+internal/session  atomic JSON session store with checkpoints
 internal/web      HTTP API, NDJSON streaming, embedded web UI
 internal/approval approval interface and decisions
 ```
 
 The agent emits typed events (`text`, `reasoning`, `tool_start`, `tool_end`,
-`approval_request`, `compact`, `subagent_start`, `done`, …). The CLI renderer
-and the web UI both consume the same events, so behavior stays consistent.
+`diff`, `approval_request`, `usage`, `compact`, `subagent_start`, `done`, …).
+The CLI renderer and the web UI both consume the same events, so behavior stays
+consistent.
 
 ## Security notes
 
@@ -281,8 +321,7 @@ and the web UI both consume the same events, so behavior stays consistent.
 
 ## Roadmap
 
-- Diff preview before edits and `/undo`.
 - Session search and export.
 - Optional web authentication and remote bind support.
 - More providers and image input.
-- Token/cost breakdown per tool and per turn.
+- Per-tool cost attribution inside a turn.

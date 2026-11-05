@@ -74,8 +74,9 @@ Common flags:
   -config PATH       config file (default ~/.codedeep/config.json)
   -cwd DIR           workspace directory (default: current directory)
   -m, -model NAME    model name
-  -approval MODE     ask, auto, or readonly
+  -approval MODE     ask, auto, readonly, or plan
   -y, -yes           shorthand for -approval auto
+  -plan              read-only planning mode (blocks mutations)
   -debug             verbose logging to stderr
 
 Chat flags:
@@ -103,6 +104,7 @@ type commonFlags struct {
 	approval   string
 	cwd        string
 	auto       bool
+	plan       bool
 	debug      bool
 }
 
@@ -110,10 +112,11 @@ func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.configPath, "config", "", "config file path")
 	fs.StringVar(&c.model, "m", "", "model name")
 	fs.StringVar(&c.model, "model", "", "model name")
-	fs.StringVar(&c.approval, "approval", "", "approval mode: ask, auto, or readonly")
+	fs.StringVar(&c.approval, "approval", "", "approval mode: ask, auto, readonly, or plan")
 	fs.StringVar(&c.cwd, "cwd", "", "workspace directory")
 	fs.BoolVar(&c.auto, "y", false, "shorthand for -approval auto")
 	fs.BoolVar(&c.auto, "yes", false, "shorthand for -approval auto")
+	fs.BoolVar(&c.plan, "plan", false, "read-only planning mode")
 	fs.BoolVar(&c.debug, "debug", false, "verbose logging to stderr")
 }
 
@@ -130,11 +133,14 @@ func (c *commonFlags) apply(cfg *config.Config) error {
 	if c.approval != "" {
 		mode := strings.ToLower(strings.TrimSpace(c.approval))
 		switch mode {
-		case "ask", "auto", "readonly":
+		case "ask", "auto", "readonly", "plan":
 			cfg.Approval = mode
 		default:
-			return fmt.Errorf("invalid approval mode %q (use ask, auto, or readonly)", c.approval)
+			return fmt.Errorf("invalid approval mode %q (use ask, auto, readonly, or plan)", c.approval)
 		}
+	}
+	if c.plan {
+		cfg.Approval = "plan"
 	}
 	if c.cwd != "" {
 		abs, err := filepath.Abs(c.cwd)
