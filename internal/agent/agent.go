@@ -69,6 +69,7 @@ type Agent struct {
 	autoAllow map[string]bool
 	usage     llm.Usage
 	turnUsage llm.Usage
+	turnTools map[string]llm.ToolUsage
 
 	session    *session.Session
 	checkpoint *session.Checkpoint
@@ -128,6 +129,7 @@ func (a *Agent) RunWithImages(ctx context.Context, sess *session.Session, prompt
 	sess.Turns++
 	a.session = sess
 	a.turnUsage = llm.Usage{}
+	a.turnTools = map[string]llm.ToolUsage{}
 	a.approval = a.cfg.ApprovalMode()
 	sess.Checkpoints = append(sess.Checkpoints, session.Checkpoint{
 		Turn: sess.Turns,
@@ -175,11 +177,13 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 
 		a.emitEvent(Event{Type: EventAssistantStart, SessionID: sessionID(sess), Depth: a.depth})
 		resp, err := a.client.Stream(ctx, llm.ChatRequest{
-			Model:       a.cfg.Model,
-			Messages:    requestMsgs,
-			Tools:       a.reg.Definitions(),
-			MaxTokens:   a.cfg.MaxTokens,
-			Temperature: a.cfg.Temperature,
+			Model:           a.cfg.Model,
+			Messages:        requestMsgs,
+			Tools:           a.reg.Definitions(),
+			MaxTokens:       a.cfg.MaxTokens,
+			Temperature:     a.cfg.Temperature,
+			ReasoningEffort: a.cfg.ReasoningEffort,
+			ReasoningBudget: a.cfg.ReasoningBudget,
 		}, func(d llm.Delta) error {
 			if d.Reasoning != "" {
 				a.emitEvent(Event{Type: EventReasoning, SessionID: sessionID(sess), Depth: a.depth, Text: d.Reasoning})
@@ -245,6 +249,8 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 		if assistant.Content != "" {
 			lastText = assistant.Content
 		}
+		callUsage := attributeToolUsage(usage, assistant.ToolCalls)
+		a.recordToolUsage(assistant.ToolCalls, callUsage, sess)
 		a.save(sess)
 
 		if len(assistant.ToolCalls) == 0 {
@@ -254,7 +260,7 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 			return lastText, nil
 		}
 
-		outputs := a.executeToolCalls(ctx, assistant.ToolCalls, sess)
+		outputs := a.executeToolCalls(ctx, assistant.ToolCalls, sess, callUsage)
 		for i, tc := range assistant.ToolCalls {
 			*msgs = append(*msgs, llm.Message{
 				Role:       "tool",
@@ -275,7 +281,7 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 
 // executeToolCalls runs a model turn's tool calls and returns the results in
 // call order. Batches that contain only read-only tools run concurrently.
-func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall, sess *session.Session) []string {
+func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall, sess *session.Session, callUsage []llm.ToolUsage) []string {
 	results := make([]string, len(calls))
 	if len(calls) < 2 || !a.allReadOnly(calls) {
 		for i, tc := range calls {
@@ -283,7 +289,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall, sess
 				results[i] = "Error: cancelled by user."
 				continue
 			}
-			results[i] = a.executeTool(ctx, tc, sess)
+			results[i] = a.executeTool(ctx, tc, sess, usageAt(callUsage, i))
 		}
 		return results
 	}
@@ -305,7 +311,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall, sess
 				results[i] = "Error: cancelled by user."
 				return
 			}
-			results[i] = a.executeTool(ctx, tc, sess)
+			results[i] = a.executeTool(ctx, tc, sess, usageAt(callUsage, i))
 		}(i, tc)
 	}
 	wg.Wait()
@@ -329,7 +335,7 @@ func (a *Agent) allReadOnly(calls []llm.ToolCall) bool {
 	return true
 }
 
-func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.Session) string {
+func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.Session, callUsage llm.ToolUsage) string {
 	name := tc.Function.Name
 	raw := json.RawMessage(tc.Function.Arguments)
 	if len(strings.TrimSpace(string(raw))) == 0 {
@@ -341,14 +347,19 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 		eventArgs = encoded
 	}
 
-	a.emitEvent(Event{
+	ev := Event{
 		Type:      EventToolStart,
 		SessionID: sessionID(sess),
 		Depth:     a.depth,
 		Name:      name,
 		Args:      eventArgs,
 		CallID:    tc.ID,
-	})
+	}
+	if callUsage.Usage.TotalTokens > 0 {
+		ev.Usage = &callUsage.Usage
+		ev.CostUSD = callUsage.CostUSD
+	}
+	a.emitEvent(ev)
 
 	finish := func(output string, isErr bool) string {
 		if strings.TrimSpace(output) == "" {
@@ -474,7 +485,11 @@ func formatDiagnostics(outcomes []diagnostics.Outcome) string {
 			status = "failed"
 		}
 		fmt.Fprintf(&b, "$ %s (%s)\n", out.Command, status)
-		if strings.TrimSpace(out.Output) != "" {
+		if len(out.Diagnostics) > 0 {
+			for _, d := range out.Diagnostics {
+				fmt.Fprintf(&b, "%s\n", util.Truncate(formatDiagnostic(d), 500))
+			}
+		} else if strings.TrimSpace(out.Output) != "" {
 			b.WriteString(out.Output)
 			if !strings.HasSuffix(out.Output, "\n") {
 				b.WriteByte('\n')
@@ -482,6 +497,21 @@ func formatDiagnostics(outcomes []diagnostics.Outcome) string {
 		}
 	}
 	return b.String()
+}
+
+func formatDiagnostic(d diagnostics.Diagnostic) string {
+	loc := d.Path
+	if d.Line > 0 {
+		loc += fmt.Sprintf(":%d", d.Line)
+		if d.Column > 0 {
+			loc += fmt.Sprintf(":%d", d.Column)
+		}
+	}
+	sev := ""
+	if d.Severity != "" {
+		sev = d.Severity + ": "
+	}
+	return fmt.Sprintf("%s: %s%s", loc, sev, d.Message)
 }
 
 func (a *Agent) emitHookOutcomes(tc llm.ToolCall, sess *session.Session, outcomes []hooks.Outcome) {
@@ -506,15 +536,16 @@ func (a *Agent) emitHookOutcomes(tc llm.ToolCall, sess *session.Session, outcome
 func (a *Agent) emitDiagnosticOutcomes(tc llm.ToolCall, sess *session.Session, path string, outcomes []diagnostics.Outcome) {
 	for _, out := range outcomes {
 		a.emitEvent(Event{
-			Type:      EventDiagnostics,
-			SessionID: sessionID(sess),
-			Depth:     a.depth,
-			Name:      out.Pattern,
-			Message:   out.Command,
-			Path:      path,
-			Output:    util.TruncateMiddle(out.Output, 8*1024),
-			IsError:   out.IsError,
-			CallID:    tc.ID,
+			Type:        EventDiagnostics,
+			SessionID:   sessionID(sess),
+			Depth:       a.depth,
+			Name:        out.Pattern,
+			Message:     out.Command,
+			Path:        path,
+			Output:      util.TruncateMiddle(out.Output, 8*1024),
+			IsError:     out.IsError,
+			CallID:      tc.ID,
+			Annotations: out.Diagnostics,
 		})
 	}
 }
@@ -742,6 +773,86 @@ func (a *Agent) Undo(sess *session.Session) ([]string, error) {
 	return restored, nil
 }
 
+// attributeToolUsage splits one model response's usage evenly across the tool
+// calls it requested, distributing indivisible remainder tokens to the first
+// calls so the attributed totals match the response exactly.
+func attributeToolUsage(usage llm.Usage, calls []llm.ToolCall) []llm.ToolUsage {
+	out := make([]llm.ToolUsage, len(calls))
+	if len(calls) == 0 {
+		return out
+	}
+	n := len(calls)
+	base := llm.Usage{
+		PromptTokens:         usage.PromptTokens / n,
+		CompletionTokens:     usage.CompletionTokens / n,
+		TotalTokens:          usage.TotalTokens / n,
+		PromptCacheHitTokens: usage.PromptCacheHitTokens / n,
+	}
+	remPrompt := usage.PromptTokens % n
+	remCompletion := usage.CompletionTokens % n
+	remTotal := usage.TotalTokens % n
+	remCache := usage.PromptCacheHitTokens % n
+	for i := range out {
+		u := base
+		if i < remPrompt {
+			u.PromptTokens++
+		}
+		if i < remCompletion {
+			u.CompletionTokens++
+		}
+		if i < remTotal {
+			u.TotalTokens++
+		}
+		if i < remCache {
+			u.PromptCacheHitTokens++
+		}
+		out[i] = llm.ToolUsage{Calls: 1, Usage: u}
+	}
+	return out
+}
+
+func usageAt(list []llm.ToolUsage, i int) llm.ToolUsage {
+	if i >= 0 && i < len(list) {
+		return list[i]
+	}
+	return llm.ToolUsage{Calls: 1}
+}
+
+func (a *Agent) recordToolUsage(calls []llm.ToolCall, callUsage []llm.ToolUsage, sess *session.Session) {
+	if len(calls) == 0 {
+		return
+	}
+	if a.turnTools == nil {
+		a.turnTools = map[string]llm.ToolUsage{}
+	}
+	for i, tc := range calls {
+		u := usageAt(callUsage, i)
+		if u.Usage.TotalTokens == 0 {
+			continue
+		}
+		u.CostUSD = a.costOf(u.Usage)
+		if i < len(callUsage) {
+			callUsage[i] = u
+		}
+		name := tc.Function.Name
+		turn := a.turnTools[name]
+		turn.Calls += u.Calls
+		turn.Usage = turn.Usage.Add(u.Usage)
+		turn.CostUSD = a.costOf(turn.Usage)
+		a.turnTools[name] = turn
+		if sess != nil {
+			if sess.ToolUsage == nil {
+				sess.ToolUsage = map[string]llm.ToolUsage{}
+			}
+			total := sess.ToolUsage[name]
+			total.Calls += u.Calls
+			total.Usage = total.Usage.Add(u.Usage)
+			total.CostUSD = a.costOf(total.Usage)
+			sess.ToolUsage[name] = total
+		}
+	}
+}
+
 func (a *Agent) costOf(u llm.Usage) float64 {
 	cost, ok := a.cfg.UsageCost(u)
 	if !ok {
@@ -759,6 +870,7 @@ func (a *Agent) doneEvent(sess *session.Session, message string) Event {
 		Message:    message,
 		Usage:      &a.usage,
 		TotalUsage: total,
+		ToolUsage:  a.turnTools,
 		CostUSD:    a.costOf(a.turnUsage),
 		TotalCost:  a.costOf(*total),
 	}

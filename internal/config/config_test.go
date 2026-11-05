@@ -17,6 +17,7 @@ var configEnvVars = []string{
 	"GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_BASE_URL",
 	"CODEAGENT_MODEL", "DEEPSEEK_MODEL",
 	"CODEAGENT_MAX_TOKENS", "CODEAGENT_TEMPERATURE", "CODEAGENT_CONTEXT_WINDOW",
+	"CODEAGENT_REASONING_EFFORT", "CODEAGENT_REASONING_BUDGET",
 	"CODEAGENT_COMPACT_AT", "CODEAGENT_APPROVAL", "CODEAGENT_SESSIONS_DIR",
 	"CODEAGENT_SHELL", "CODEAGENT_MAX_STEPS", "CODEAGENT_WEB_ADDR",
 	"CODEAGENT_DEBUG", "CODEAGENT_ALLOW_OUTSIDE",
@@ -184,6 +185,52 @@ func TestNormalizeRepairsOutOfRangeValues(t *testing.T) {
 	}
 	if cfg.Model != "deepseek-chat" {
 		t.Errorf("model = %q", cfg.Model)
+	}
+}
+
+func TestReasoningNormalization(t *testing.T) {
+	cfg := loadFrom(t, `{"reasoning_effort": "HIGH", "reasoning_budget_tokens": 512}`)
+	if cfg.ReasoningEffort != "high" || cfg.ReasoningBudget != 1024 {
+		t.Errorf("reasoning = %q / %d, want normalized high / 1024", cfg.ReasoningEffort, cfg.ReasoningBudget)
+	}
+
+	cfg = loadFrom(t, `{"reasoning_effort": "turbo", "reasoning_budget_tokens": -5}`)
+	if cfg.ReasoningEffort != "" || cfg.ReasoningBudget != 0 {
+		t.Errorf("invalid reasoning = %q / %d, want empty / 0", cfg.ReasoningEffort, cfg.ReasoningBudget)
+	}
+
+	cfg = loadFrom(t, `{"reasoning_budget_tokens": 90000}`)
+	if cfg.ReasoningBudget != 64000 {
+		t.Errorf("reasoning budget = %d, want cap 64000", cfg.ReasoningBudget)
+	}
+}
+
+func TestReasoningRaisesAnthropicMaxTokens(t *testing.T) {
+	cfg := loadFrom(t, `{"provider": "anthropic", "max_tokens": 2048, "reasoning_budget_tokens": 4000}`)
+	if cfg.MaxTokens != 8096 {
+		t.Errorf("max_tokens = %d, want budget+4096", cfg.MaxTokens)
+	}
+
+	cfg = loadFrom(t, `{"provider": "anthropic", "max_tokens": 8192, "reasoning_budget_tokens": 4000}`)
+	if cfg.MaxTokens != 8192 {
+		t.Errorf("max_tokens = %d, should stay above budget", cfg.MaxTokens)
+	}
+}
+
+func TestReasoningEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CODEAGENT_REASONING_EFFORT", "medium")
+	t.Setenv("CODEAGENT_REASONING_BUDGET", "12000")
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ReasoningEffort != "medium" || cfg.ReasoningBudget != 12000 {
+		t.Errorf("reasoning env = %q / %d", cfg.ReasoningEffort, cfg.ReasoningBudget)
 	}
 }
 

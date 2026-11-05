@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"codedeep/internal/agent"
+	"codedeep/internal/diagnostics"
 	"codedeep/internal/llm"
 	"codedeep/internal/util"
 )
@@ -193,8 +194,12 @@ func (r *renderer) Emit(ev agent.Event) {
 	case agent.EventToolStart:
 		r.ensureNL()
 		r.inReasoning = false
+		suffix := describeToolArgs(ev.Name, ev.Args, 120)
+		if ev.Usage != nil && ev.Usage.TotalTokens > 0 {
+			suffix = strings.TrimSpace(suffix + " " + usageChip(ev.Usage, ev.CostUSD))
+		}
 		fmt.Fprintf(r.out, "%s%s %s %s\n",
-			r.depthPrefix(ev.Depth), r.p.cyan("➜"), r.p.bold(ev.Name), r.p.dim(describeToolArgs(ev.Name, ev.Args, 120)))
+			r.depthPrefix(ev.Depth), r.p.cyan("➜"), r.p.bold(ev.Name), r.p.dim(suffix))
 		r.atLineStart = true
 
 	case agent.EventToolEnd:
@@ -257,7 +262,7 @@ func (r *renderer) Emit(ev agent.Event) {
 		}
 
 	case agent.EventDiagnostics:
-		if ev.IsError || r.debug {
+		if ev.IsError || len(ev.Annotations) > 0 || r.debug {
 			r.ensureNL()
 			r.inReasoning = false
 			label := ev.Message
@@ -269,10 +274,15 @@ func (r *renderer) Emit(ev agent.Event) {
 				status = r.p.red("failed")
 			}
 			fmt.Fprintf(r.out, "%s%s %s %s\n", r.depthPrefix(ev.Depth), r.p.cyan("diagnostics"), status, r.p.dim(label))
-			if ev.IsError && strings.TrimSpace(ev.Output) != "" {
-				r.stream(util.TruncateMiddle(ev.Output, 2000), r.depthPrefix(ev.Depth)+"  ", r.p.dim)
-				r.ensureNL()
+			if len(ev.Annotations) > 0 {
+				for _, d := range ev.Annotations {
+					r.printAnnotation(d, ev.Depth)
+				}
 			}
+			if ev.IsError && len(ev.Annotations) == 0 && strings.TrimSpace(ev.Output) != "" {
+				r.stream(util.TruncateMiddle(ev.Output, 2000), r.depthPrefix(ev.Depth)+"  ", r.p.dim)
+			}
+			r.ensureNL()
 		}
 
 	case agent.EventApprovalResult:
@@ -317,6 +327,9 @@ func (r *renderer) Emit(ev agent.Event) {
 		if len(parts) > 0 {
 			fmt.Fprintf(r.out, "%s %s\n", r.p.dim("──"), r.p.dim(strings.Join(parts, " · ")))
 		}
+		if line := toolUsageLine(ev.ToolUsage); line != "" {
+			fmt.Fprintf(r.out, "%s %s\n", r.p.dim("tools"), r.p.dim(line))
+		}
 	}
 
 	r.out.Flush()
@@ -345,6 +358,66 @@ func (r *renderer) printDiff(text string, depth int) {
 		}
 		fmt.Fprintf(r.out, "%s%s\n", prefix, line)
 	}
+}
+
+func (r *renderer) printAnnotation(d diagnostics.Diagnostic, depth int) {
+	loc := d.Path
+	if d.Line > 0 {
+		loc += fmt.Sprintf(":%d", d.Line)
+		if d.Column > 0 {
+			loc += fmt.Sprintf(":%d", d.Column)
+		}
+	}
+	label := d.Severity
+	switch d.Severity {
+	case "error":
+		label = r.p.red("error")
+	case "warning":
+		label = r.p.yellow("warning")
+	case "note":
+		label = r.p.cyan("note")
+	case "":
+	default:
+		label = r.p.dim(d.Severity)
+	}
+	parts := []string{r.p.bold(loc)}
+	if label != "" {
+		parts = append(parts, label)
+	}
+	parts = append(parts, d.Message)
+	fmt.Fprintf(r.out, "%s  %s\n", r.depthPrefix(depth), strings.Join(parts, " "))
+}
+
+func usageChip(u *llm.Usage, cost float64) string {
+	label := "[" + humanTokens(u.TotalTokens) + " tok"
+	if c := humanCost(cost); c != "" {
+		label += " · " + c
+	}
+	return label + "]"
+}
+
+func toolUsageLine(usage map[string]llm.ToolUsage) string {
+	if len(usage) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(usage))
+	for name := range usage {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		u := usage[name]
+		if u.Usage.TotalTokens == 0 {
+			continue
+		}
+		part := fmt.Sprintf("%s ×%d %s tok", name, u.Calls, humanTokens(u.Usage.TotalTokens))
+		if c := humanCost(u.CostUSD); c != "" {
+			part += " " + c
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func humanCost(usd float64) string {

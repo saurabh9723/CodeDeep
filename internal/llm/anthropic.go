@@ -37,10 +37,16 @@ type anthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature *float64           `json:"temperature,omitempty"`
+	Thinking    *anthropicThinking `json:"thinking,omitempty"`
 	System      string             `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Tools       []anthropicTool    `json:"tools,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
+}
+
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicMessage struct {
@@ -51,6 +57,8 @@ type anthropicMessage struct {
 type anthropicBlock struct {
 	Type      string                `json:"type"`
 	Text      string                `json:"text,omitempty"`
+	Thinking  string                `json:"thinking,omitempty"`
+	Signature string                `json:"signature,omitempty"`
 	ID        string                `json:"id,omitempty"`
 	Name      string                `json:"name,omitempty"`
 	Input     json.RawMessage       `json:"input,omitempty"`
@@ -76,7 +84,13 @@ func (c *AnthropicClient) buildBody(req ChatRequest, stream bool) ([]byte, error
 	if body.MaxTokens <= 0 {
 		body.MaxTokens = 4096
 	}
-	if req.Temperature > 0 {
+	if req.ReasoningBudget > 0 {
+		body.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: req.ReasoningBudget}
+		if body.MaxTokens <= req.ReasoningBudget {
+			body.MaxTokens = req.ReasoningBudget + 4096
+		}
+		// Extended thinking requires the default temperature.
+	} else if req.Temperature > 0 {
 		t := req.Temperature
 		body.Temperature = &t
 	}
@@ -111,6 +125,12 @@ func (c *AnthropicClient) buildBody(req ChatRequest, stream bool) ([]byte, error
 			}
 		case "assistant":
 			role = "assistant"
+			// Extended thinking blocks must lead the assistant turn and keep
+			// their signature, or the API rejects the tool-result follow-up.
+			// They are only valid while thinking is enabled.
+			if req.ReasoningBudget > 0 && m.Reasoning != "" && m.ReasoningSignature != "" {
+				blocks = append(blocks, anthropicBlock{Type: "thinking", Thinking: m.Reasoning, Signature: m.ReasoningSignature})
+			}
 			if m.Content != "" {
 				blocks = append(blocks, anthropicBlock{Type: "text", Text: m.Content})
 			}
@@ -177,6 +197,7 @@ type anthropicDelta struct {
 	Type        string `json:"type"`
 	Text        string `json:"text"`
 	Thinking    string `json:"thinking"`
+	Signature   string `json:"signature"`
 	PartialJSON string `json:"partial_json"`
 	StopReason  string `json:"stop_reason"`
 }
@@ -254,7 +275,7 @@ func (c *AnthropicClient) Stream(ctx context.Context, req ChatRequest, onDelta f
 
 func (c *AnthropicClient) parseStream(ctx context.Context, body io.ReadCloser, onDelta func(Delta) error) (*Response, error) {
 	resp := &Response{}
-	var text, reasoning strings.Builder
+	var text, reasoning, signature strings.Builder
 	calls := map[int]*partialCall{}
 	var order []int
 
@@ -303,6 +324,8 @@ func (c *AnthropicClient) parseStream(ctx context.Context, body io.ReadCloser, o
 						}
 					}
 				}
+			case "signature_delta":
+				signature.WriteString(ev.Delta.Signature)
 			case "input_json_delta":
 				if p, ok := calls[ev.Index]; ok {
 					p.args.WriteString(ev.Delta.PartialJSON)
@@ -331,6 +354,7 @@ func (c *AnthropicClient) parseStream(ctx context.Context, body io.ReadCloser, o
 	resp.Message.Role = "assistant"
 	resp.Message.Content = text.String()
 	resp.Message.Reasoning = reasoning.String()
+	resp.Message.ReasoningSignature = signature.String()
 	sort.Ints(order)
 	for _, idx := range order {
 		p := calls[idx]
@@ -428,11 +452,17 @@ func (c *AnthropicClient) Complete(ctx context.Context, req ChatRequest) (*Respo
 		}
 		resp := &Response{FinishReason: anthropicStopReason(out.StopReason)}
 		resp.Message.Role = "assistant"
-		var text strings.Builder
+		var text, reasoning, signature strings.Builder
 		for _, block := range out.Content {
 			switch block.Type {
 			case "text":
 				text.WriteString(block.Text)
+			case "thinking":
+				reasoning.WriteString(block.Thinking)
+				if block.Signature != "" {
+					signature.Reset()
+					signature.WriteString(block.Signature)
+				}
 			case "tool_use":
 				args := strings.TrimSpace(string(block.Input))
 				if args == "" {
@@ -446,6 +476,8 @@ func (c *AnthropicClient) Complete(ctx context.Context, req ChatRequest) (*Respo
 			}
 		}
 		resp.Message.Content = text.String()
+		resp.Message.Reasoning = reasoning.String()
+		resp.Message.ReasoningSignature = signature.String()
 		resp.Usage = Usage{
 			PromptTokens:         out.Usage.InputTokens,
 			CompletionTokens:     out.Usage.OutputTokens,

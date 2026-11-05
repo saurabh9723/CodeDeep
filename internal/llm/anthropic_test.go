@@ -188,6 +188,134 @@ func TestAnthropicBuildsToolResultMessages(t *testing.T) {
 	}
 }
 
+func TestAnthropicExtendedThinkingRequest(t *testing.T) {
+	c := NewAnthropicClient("", "k")
+	payload, err := c.buildBody(ChatRequest{
+		Model:           "claude-test",
+		MaxTokens:       1000,
+		Temperature:     0.7,
+		ReasoningBudget: 2048,
+		Messages:        []Message{{Role: "user", Content: "think"}},
+	}, true)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	thinking, _ := body["thinking"].(map[string]any)
+	if thinking["type"] != "enabled" || thinking["budget_tokens"] != float64(2048) {
+		t.Errorf("thinking = %#v", body["thinking"])
+	}
+	if body["max_tokens"] != float64(2048+4096) {
+		t.Errorf("max_tokens = %#v, want budget+4096", body["max_tokens"])
+	}
+	if _, ok := body["temperature"]; ok {
+		t.Errorf("temperature must be omitted with extended thinking: %#v", body["temperature"])
+	}
+}
+
+func TestAnthropicEchoesThinkingBlocks(t *testing.T) {
+	c := NewAnthropicClient("", "k")
+	payload, err := c.buildBody(ChatRequest{
+		Model:           "claude-test",
+		ReasoningBudget: 2048,
+		Messages: []Message{
+			{Role: "user", Content: "run it"},
+			{Role: "assistant", Reasoning: "list the files", ReasoningSignature: "sig-1", ToolCalls: []ToolCall{{
+				ID: "t1", Type: "function", Function: FunctionCall{Name: "bash", Arguments: `{"command":"ls"}`},
+			}}},
+			{Role: "tool", ToolCallID: "t1", Content: "a.txt"},
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var echo struct {
+		Messages []struct {
+			Role    string           `json:"role"`
+			Content []anthropicBlock `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(payload, &echo); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	assistant := echo.Messages[1].Content
+	if len(assistant) != 2 || assistant[0].Type != "thinking" {
+		t.Fatalf("assistant blocks = %#v", assistant)
+	}
+	if assistant[0].Thinking != "list the files" || assistant[0].Signature != "sig-1" {
+		t.Errorf("thinking block = %#v", assistant[0])
+	}
+	if assistant[1].Type != "tool_use" {
+		t.Errorf("tool block = %#v", assistant[1])
+	}
+
+	payload, err = c.buildBody(ChatRequest{
+		Model: "claude-test",
+		Messages: []Message{
+			{Role: "user", Content: "run it"},
+			{Role: "assistant", Reasoning: "list the files", ReasoningSignature: "sig-1"},
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	if strings.Contains(string(payload), `"type":"thinking"`) {
+		t.Error("thinking blocks must not be sent while extended thinking is disabled")
+	}
+}
+
+func TestAnthropicThinkingParsedFromComplete(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"content":[
+				{"type":"thinking","thinking":"plan first","signature":"sig-9"},
+				{"type":"text","text":"done"}
+			],
+			"stop_reason":"end_turn",
+			"usage":{"input_tokens":4,"output_tokens":2}
+		}`)
+	}))
+	defer srv.Close()
+
+	resp, err := NewAnthropicClient(srv.URL, "k").Complete(context.Background(), ChatRequest{
+		Model: "claude-test", Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Message.Reasoning != "plan first" || resp.Message.ReasoningSignature != "sig-9" || resp.Message.Content != "done" {
+		t.Errorf("reasoning = %q / sig %q / content %q", resp.Message.Reasoning, resp.Message.ReasoningSignature, resp.Message.Content)
+	}
+}
+
+func TestAnthropicThinkingStreamedWithSignature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeAnthropicSSE(w,
+			map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "thinking"}},
+			map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "thinking_delta", "thinking": "pondering"}},
+			map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "signature_delta", "signature": "sig-stream"}},
+			map[string]any{"type": "content_block_start", "index": 1, "content_block": map[string]any{"type": "text"}},
+			map[string]any{"type": "content_block_delta", "index": 1, "delta": map[string]any{"type": "text_delta", "text": "answer"}},
+			map[string]any{"type": "message_stop"},
+		)
+	}))
+	defer srv.Close()
+
+	resp, err := NewAnthropicClient(srv.URL, "k").Stream(context.Background(), ChatRequest{
+		Model: "claude-test", Messages: []Message{{Role: "user", Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if resp.Message.Reasoning != "pondering" || resp.Message.ReasoningSignature != "sig-stream" || resp.Message.Content != "answer" {
+		t.Errorf("streamed reasoning = %q / sig %q / content %q", resp.Message.Reasoning, resp.Message.ReasoningSignature, resp.Message.Content)
+	}
+}
+
 func TestAnthropicListModels(t *testing.T) {
 	var path string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

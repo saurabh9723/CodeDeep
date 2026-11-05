@@ -71,7 +71,7 @@ func TestPostHookAndDiagnosticsRunAfterChange(t *testing.T) {
 	})
 
 	cfg := testConfig(t)
-	cfg.Diagnostics = []config.DiagnosticRule{{Pattern: "*.go", Command: "echo diag-clean"}}
+	cfg.Diagnostics = []config.DiagnosticRule{{Pattern: "*.go", Command: "echo main.go:7:2: error: missing thing"}}
 	cfg.Hooks.PostTool = []config.Hook{{Command: "echo post-clean"}}
 	var events []Event
 	a := newAgentWith(t, cfg, client, reg, nil, &events)
@@ -86,7 +86,7 @@ func TestPostHookAndDiagnosticsRunAfterChange(t *testing.T) {
 			toolMsg = m.Content
 		}
 	}
-	for _, want := range []string{"edited main.go", "diag-clean", "post-clean"} {
+	for _, want := range []string{"edited main.go", "main.go:7:2: error: missing thing", "post-clean"} {
 		if !strings.Contains(toolMsg, want) {
 			t.Errorf("tool message is missing %q: %q", want, toolMsg)
 		}
@@ -95,6 +95,13 @@ func TestPostHookAndDiagnosticsRunAfterChange(t *testing.T) {
 	diag := findEvent(events, EventDiagnostics)
 	if diag == nil || diag.Name != "*.go" || diag.Path != "main.go" || diag.IsError {
 		t.Fatalf("diagnostics event = %+v", diag)
+	}
+	if len(diag.Annotations) != 1 {
+		t.Fatalf("diagnostics annotations = %+v", diag.Annotations)
+	}
+	ann := diag.Annotations[0]
+	if ann.Path != "main.go" || ann.Line != 7 || ann.Column != 2 || ann.Severity != "error" || ann.Message != "missing thing" {
+		t.Fatalf("annotation = %+v", ann)
 	}
 	hook := findEvent(events, EventHook)
 	if hook == nil || hook.Name != "post_tool" || hook.IsError {

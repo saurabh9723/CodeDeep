@@ -18,16 +18,17 @@ import (
 )
 
 type Session struct {
-	ID          string        `json:"id"`
-	Title       string        `json:"title"`
-	Model       string        `json:"model"`
-	Cwd         string        `json:"cwd"`
-	Created     time.Time     `json:"created"`
-	Updated     time.Time     `json:"updated"`
-	Messages    []llm.Message `json:"messages"`
-	Usage       llm.Usage     `json:"usage"`
-	Turns       int           `json:"turns"`
-	Checkpoints []Checkpoint  `json:"checkpoints,omitempty"`
+	ID          string                   `json:"id"`
+	Title       string                   `json:"title"`
+	Model       string                   `json:"model"`
+	Cwd         string                   `json:"cwd"`
+	Created     time.Time                `json:"created"`
+	Updated     time.Time                `json:"updated"`
+	Messages    []llm.Message            `json:"messages"`
+	Usage       llm.Usage                `json:"usage"`
+	ToolUsage   map[string]llm.ToolUsage `json:"tool_usage,omitempty"`
+	Turns       int                      `json:"turns"`
+	Checkpoints []Checkpoint             `json:"checkpoints,omitempty"`
 }
 
 // Checkpoint is the pre-turn state of every file a turn mutated. Undo restores

@@ -53,13 +53,14 @@ func NewClient(baseURL, apiKey string) *Client {
 }
 
 type apiChatRequest struct {
-	Model         string         `json:"model"`
-	Messages      []apiMessage   `json:"messages"`
-	Tools         []Tool         `json:"tools,omitempty"`
-	MaxTokens     int            `json:"max_tokens,omitempty"`
-	Temperature   *float64       `json:"temperature,omitempty"`
-	Stream        bool           `json:"stream,omitempty"`
-	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Model           string         `json:"model"`
+	Messages        []apiMessage   `json:"messages"`
+	Tools           []Tool         `json:"tools,omitempty"`
+	MaxTokens       int            `json:"max_tokens,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Stream          bool           `json:"stream,omitempty"`
+	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
 }
 
 type streamOptions struct {
@@ -124,11 +125,12 @@ func toAPIMessages(msgs []Message) []apiMessage {
 
 func (c *Client) buildBody(req ChatRequest, stream bool) ([]byte, error) {
 	body := apiChatRequest{
-		Model:     req.Model,
-		Messages:  toAPIMessages(req.Messages),
-		Tools:     req.Tools,
-		MaxTokens: req.MaxTokens,
-		Stream:    stream,
+		Model:           req.Model,
+		Messages:        toAPIMessages(req.Messages),
+		Tools:           req.Tools,
+		MaxTokens:       req.MaxTokens,
+		ReasoningEffort: strings.TrimSpace(req.ReasoningEffort),
+		Stream:          stream,
 	}
 	if req.Temperature > 0 {
 		t := req.Temperature

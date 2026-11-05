@@ -419,6 +419,20 @@ Set one of:
 Or add "api_key" to ~/.codedeep/config.json. Run "codedeep doctor" to check.`)
 }
 
+func reasoningSummary(cfg *config.Config) string {
+	parts := make([]string, 0, 2)
+	if cfg.ReasoningEffort != "" {
+		parts = append(parts, "effort "+cfg.ReasoningEffort)
+	}
+	if cfg.ReasoningBudget > 0 {
+		parts = append(parts, fmt.Sprintf("budget %d tokens", cfg.ReasoningBudget))
+	}
+	if len(parts) == 0 {
+		return "off"
+	}
+	return strings.Join(parts, " · ")
+}
+
 func maskKey(key string) string {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -471,6 +485,7 @@ func cmdDoctor(args []string) int {
 	fmt.Printf("shell          %s\n", shell)
 	fmt.Printf("context        %d tokens (compact at %.0f%%)\n", cfg.ContextWindow, cfg.CompactAt*100)
 	fmt.Printf("max steps      %d\n", cfg.MaxSteps)
+	fmt.Printf("reasoning      %s\n", reasoningSummary(cfg))
 
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	reg := tools.NewRegistry()

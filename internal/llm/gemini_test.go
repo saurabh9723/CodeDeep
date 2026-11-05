@@ -214,6 +214,39 @@ func TestGeminiComplete(t *testing.T) {
 	}
 }
 
+func TestGeminiThinkingConfig(t *testing.T) {
+	c := NewGeminiClient("", "k")
+	payload, err := c.buildBody(ChatRequest{
+		Model:           "gemini-2.5-pro",
+		ReasoningBudget: 4096,
+		Messages:        []Message{{Role: "user", Content: "think"}},
+	})
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var body struct {
+		GenerationConfig map[string]any `json:"generationConfig"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	thinking, _ := body.GenerationConfig["thinkingConfig"].(map[string]any)
+	if thinking["thinkingBudget"] != float64(4096) || thinking["includeThoughts"] != true {
+		t.Errorf("thinkingConfig = %#v", body.GenerationConfig["thinkingConfig"])
+	}
+
+	payload, err = c.buildBody(ChatRequest{
+		Model:    "gemini-2.5-pro",
+		Messages: []Message{{Role: "user", Content: "think"}},
+	})
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	if strings.Contains(string(payload), "thinkingConfig") {
+		t.Error("thinkingConfig should be omitted when no budget is set")
+	}
+}
+
 func TestGeminiListModels(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"models":[{"name":"models/gemini-b"},{"name":"models/gemini-a"}]}`)

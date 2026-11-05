@@ -86,6 +86,12 @@ func (c *GeminiClient) buildBody(req ChatRequest) ([]byte, error) {
 	if req.Temperature > 0 {
 		config["temperature"] = req.Temperature
 	}
+	if req.ReasoningBudget > 0 {
+		config["thinkingConfig"] = map[string]any{
+			"thinkingBudget":  req.ReasoningBudget,
+			"includeThoughts": true,
+		}
+	}
 	if len(config) > 0 {
 		body.GenerationConfig = config
 	}

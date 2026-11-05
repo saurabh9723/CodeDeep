@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,13 +20,95 @@ import (
 
 const maxOutput = 16 * 1024
 
+// Diagnostic is one parsed location from a diagnostic command's output.
+type Diagnostic struct {
+	Path     string `json:"path"`
+	Line     int    `json:"line,omitempty"`
+	Column   int    `json:"column,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Message  string `json:"message"`
+}
+
 // Outcome is the output of one diagnostic command.
 type Outcome struct {
-	Pattern string
-	Command string
-	Output  string
-	IsError bool
-	Elapsed time.Duration
+	Pattern     string
+	Command     string
+	Output      string
+	IsError     bool
+	Elapsed     time.Duration
+	Diagnostics []Diagnostic
+}
+
+var (
+	diagLineCol = regexp.MustCompile(`^(.+?):(\d+):(\d+):\s*(.*)$`)
+	diagLine    = regexp.MustCompile(`^(.+?):(\d+):\s*(.*)$`)
+	diagParen   = regexp.MustCompile(`^(.+?)\((\d+),(\d+)\):\s*(.*)$`)
+)
+
+// Parse extracts file/line/column annotations from compiler, vet, and linter
+// output. Lines that do not look like diagnostics are ignored; callers format
+// the raw output separately.
+func Parse(output, defaultSeverity string) []Diagnostic {
+	var out []Diagnostic
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") ||
+			strings.HasPrefix(line, "ok ") || strings.HasPrefix(line, "FAIL") ||
+			strings.HasPrefix(line, "---") || strings.HasPrefix(line, "===") ||
+			strings.HasPrefix(line, "?") || strings.Contains(line, "://") {
+			continue
+		}
+		var d Diagnostic
+		var msg string
+		switch {
+		case diagParen.MatchString(line):
+			m := diagParen.FindStringSubmatch(line)
+			d.Path, msg = m[1], m[4]
+			d.Line, _ = strconv.Atoi(m[2])
+			d.Column, _ = strconv.Atoi(m[3])
+		case diagLineCol.MatchString(line):
+			m := diagLineCol.FindStringSubmatch(line)
+			d.Path, msg = m[1], m[4]
+			d.Line, _ = strconv.Atoi(m[2])
+			d.Column, _ = strconv.Atoi(m[3])
+		case diagLine.MatchString(line):
+			m := diagLine.FindStringSubmatch(line)
+			d.Path, msg = m[1], m[3]
+			d.Line, _ = strconv.Atoi(m[2])
+		default:
+			continue
+		}
+		if d.Path == "" || d.Line <= 0 {
+			continue
+		}
+		d.Path = filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(d.Path), "./"))
+		msg = strings.TrimSpace(msg)
+		if msg == "" {
+			continue
+		}
+		d.Severity = defaultSeverity
+		lower := strings.ToLower(msg)
+		switch {
+		case strings.HasPrefix(lower, "error:"):
+			d.Severity, msg = "error", strings.TrimSpace(msg[len("error:"):])
+		case strings.HasPrefix(lower, "warning:"):
+			d.Severity, msg = "warning", strings.TrimSpace(msg[len("warning:"):])
+		case strings.HasPrefix(lower, "warn:"):
+			d.Severity, msg = "warning", strings.TrimSpace(msg[len("warn:"):])
+		case strings.HasPrefix(lower, "note:"):
+			d.Severity, msg = "note", strings.TrimSpace(msg[len("note:"):])
+		}
+		d.Message = strings.TrimSpace(msg)
+		out = append(out, d)
+	}
+	return out
+}
+
+func defaultSeverity(isError bool) string {
+	if isError {
+		return "error"
+	}
+	return ""
 }
 
 type Runner struct {
@@ -75,6 +159,7 @@ func (r *Runner) RunAfterChange(ctx context.Context, rel string) []Outcome {
 		if err != nil && strings.TrimSpace(out.Output) == "" {
 			out.Output = err.Error()
 		}
+		out.Diagnostics = Parse(out.Output, defaultSeverity(out.IsError))
 		outcomes = append(outcomes, out)
 	}
 	return outcomes

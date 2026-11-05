@@ -289,7 +289,7 @@ async function loadSession(id) {
     setTitle(sess.title || 'Session');
     updateExportButton();
     if (sess.model) $('#modelChip').textContent = sess.model;
-    setUsage(sess.usage || null);
+    setUsage(sess.usage || null, 0, sess.tool_usage || null);
     setCheckpoints((sess.checkpoints || []).length);
     await refreshSessions();
     closeSidebar();
@@ -972,10 +972,7 @@ function handleEvent(ev) {
       }
       break;
     case 'diagnostics':
-      if (ev.is_error) {
-        const target = ev.path || ev.name || 'changed file';
-        addNote(`Diagnostics failed for ${target}: ${truncate(ev.output || '', 600)}`, 'warn');
-      }
+      addDiagnostics(ev);
       break;
     case 'error':
       if (ev.message && ev.message !== 'context canceled') addErrorCard(ev.message);
@@ -984,6 +981,7 @@ function handleEvent(ev) {
     case 'done':
       if (ev.message === 'stopped') addNote('Stopped by user', 'warn');
       if (typeof ev.checkpoints === 'number') setCheckpoints(ev.checkpoints);
+      addToolUsage(ev.tool_usage);
       break;
     default:
       break;
@@ -1117,7 +1115,17 @@ function buildToolCard(ev, nested) {
   args.title = prettyArgs(ev.args).slice(0, 2000);
   const status = el('span', 'tool-status');
   status.append(el('span', 'spinner'), el('span', '', 'running'));
-  head.append(icon, name, args, status);
+  const cost = el('span', 'tool-cost');
+  if (ev.usage && ev.usage.total_tokens) {
+    const usd = Number(ev.cost_usd) || costFor(ev.usage, state.model);
+    cost.textContent = '↑' + fmtShort(ev.usage.prompt_tokens) + ' ↓' + fmtShort(ev.usage.completion_tokens) +
+      (usd ? ' · ' + fmtCost(usd) : '');
+    cost.title = `${ev.usage.prompt_tokens || 0} prompt tokens, ${ev.usage.completion_tokens || 0} completion tokens` +
+      (usd ? `, estimated ${fmtCost(usd)} for this tool call` : '');
+    head.append(icon, name, args, cost, status);
+  } else {
+    head.append(icon, name, args, status);
+  }
 
   const body = document.createElement('details');
   body.className = 'tool-body';
@@ -1476,6 +1484,71 @@ function addNote(text, kind, turn) {
   scrollSoon();
 }
 
+function addDiagnostics(ev) {
+  const list = Array.isArray(ev.annotations) ? ev.annotations : [];
+  if (!list.length) {
+    if (ev.is_error) {
+      const target = ev.path || ev.name || 'changed file';
+      addNote(`Diagnostics failed for ${target}: ${truncate(ev.output || '', 600)}`, 'warn');
+    }
+    return;
+  }
+  const card = el('div', 'diag-card' + (ev.is_error ? ' failed' : ''));
+  const head = el('div', 'diag-head');
+  head.append(
+    el('span', 'diag-icon', '▸'),
+    el('span', 'diag-title', ev.message || ev.name || 'diagnostics')
+  );
+  if (ev.path) head.append(el('span', 'diag-file', ev.path));
+  card.append(head);
+  for (const d of list) {
+    const row = el('div', 'diag-row' + (d.severity ? ' ' + d.severity : ''));
+    const loc = el('button', 'diag-loc', diagLocation(d));
+    loc.type = 'button';
+    loc.title = 'Open in editor';
+    loc.addEventListener('click', () => openInEditor(d.path, d.line || 0));
+    row.append(
+      loc,
+      el('span', 'diag-sev', d.severity || 'info'),
+      el('span', 'diag-msg', d.message || '')
+    );
+    card.append(row);
+  }
+  (state.turn || newTurn()).append(card);
+  scrollSoon();
+}
+
+function diagLocation(d) {
+  let loc = d.path || '';
+  if (d.line) loc += ':' + d.line;
+  if (d.column) loc += ':' + d.column;
+  return loc;
+}
+
+function addToolUsage(usage) {
+  const names = Object.keys(usage || {}).filter((name) => {
+    const u = usage[name];
+    return u && u.usage && u.usage.total_tokens;
+  });
+  if (!names.length) return;
+  names.sort();
+  const card = el('div', 'tool-usage-card');
+  card.append(el('div', 'tool-usage-head', 'Attributed to tool calls'));
+  for (const name of names) {
+    const u = usage[name];
+    const usd = Number(u.cost_usd) || costFor(u.usage, state.model);
+    const row = el('div', 'tool-usage-row');
+    row.append(
+      el('span', 'tool-usage-name', `${name} ×${u.calls || 1}`),
+      el('span', 'tool-usage-tokens', `↑${fmtShort(u.usage.prompt_tokens)} ↓${fmtShort(u.usage.completion_tokens)} · ${fmtShort(u.usage.total_tokens)} tok`),
+      el('span', 'tool-usage-cost', fmtCost(usd) || '—')
+    );
+    card.append(row);
+  }
+  (state.turn || newTurn()).append(card);
+  scrollSoon();
+}
+
 function addErrorCard(text, turn) {
   const node = el('div', 'error-card', text);
   (turn || state.turn || newTurn()).append(node);
@@ -1663,7 +1736,7 @@ function fmtCost(value) {
   return '~$' + v.toFixed(2);
 }
 
-function setUsage(usage, totalCost) {
+function setUsage(usage, totalCost, toolUsage) {
   state.usage = usage || null;
   state.cost = typeof totalCost === 'number' && totalCost > 0 ? totalCost : costFor(state.usage);
   const chip = $('#usageChip');
@@ -1676,9 +1749,21 @@ function setUsage(usage, totalCost) {
   chip.textContent =
     `↑ ${fmtShort(usage.prompt_tokens)} · ↓ ${fmtShort(usage.completion_tokens)} · ${fmtShort(usage.total_tokens)} tok` +
     (cost ? ` · ${cost}` : '');
-  chip.title =
+  let title =
     `${usage.prompt_tokens || 0} prompt tokens, ${usage.completion_tokens || 0} completion tokens` +
     (cost ? `, estimated ${cost}` : '');
+  const names = Object.keys(toolUsage || {});
+  if (names.length) {
+    names.sort();
+    const parts = names.map((name) => {
+      const u = toolUsage[name] || {};
+      const tokens = (u.usage && u.usage.total_tokens) || 0;
+      const usd = Number(u.cost_usd) || 0;
+      return `${name} ×${u.calls || 1} ${fmtShort(tokens)} tok${usd ? ' ' + fmtCost(usd) : ''}`;
+    });
+    title += `; by tool: ${parts.join(' · ')}`;
+  }
+  chip.title = title;
 }
 
 function setCheckpoints(count) {

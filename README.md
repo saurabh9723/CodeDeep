@@ -53,7 +53,14 @@ the browser.
 - **Hooks** — pre- and post-tool shell hooks receive a JSON payload on stdin and
   `CODEDEEP_*` environment variables; a failing pre-hook can block the call.
 - **Post-edit diagnostics** — pattern-matched build, vet, or lint commands run
-  after a file change and their output is fed back to the model.
+  after a file change; `file:line:column` output is parsed into annotations that
+  are shown inline (and linked to your editor in the web UI) as well as fed
+  back to the model.
+- **Reasoning controls** — `reasoning_effort` maps to OpenAI-compatible
+  `reasoning_effort`; `reasoning_budget_tokens` enables Anthropic extended
+  thinking and Gemini `thinkingConfig`.
+- **Cost attribution** — token and cost totals are per turn, per session, and
+  per tool call, including a by-tool breakdown in `/status` and the web UI.
 - **Skills** — markdown instruction packs in `.codedeep/skills` (project) and
   `~/.codedeep/skills` (global), loaded by the `use_skill` tool or `/skill`.
 - **Background jobs** — `bash` can run a command in the background; `job_output`,
@@ -173,6 +180,8 @@ config file is fine. See [`config.example.json`](config.example.json).
   "model": "deepseek-chat",
   "max_tokens": 8192,
   "temperature": 0.3,
+  "reasoning_effort": "",
+  "reasoning_budget_tokens": 0,
   "context_window": 128000,
   "compact_at": 0.8,
   "approval": "ask",
@@ -214,8 +223,10 @@ config file is fine. See [`config.example.json`](config.example.json).
 `pricing` is optional. Its keys are model names; values are USD per million
 tokens. When a model has a price entry, `/status` and the web header show an
 estimated cost alongside token counts. Cached prompt tokens use
-`cache_hit_per_mtok` when set, otherwise the normal input rate. Prices change,
-so check your provider's current rates.
+`cache_hit_per_mtok` when set, otherwise the normal input rate. Each model turn
+is split evenly across the tool calls it requested, so `/status`, the web
+header, and the finished-turn summary can show usage and cost by tool as well as
+per turn and per session. Prices change, so check your provider's current rates.
 
 Prefer environment variables over storing keys in files:
 
@@ -226,6 +237,8 @@ ANTHROPIC_API_KEY=sk-ant-...     # when CODEAGENT_PROVIDER=anthropic
 GEMINI_API_KEY=...               # when CODEAGENT_PROVIDER=gemini (GOOGLE_API_KEY also works)
 DEEPSEEK_BASE_URL=...            # CODEAGENT_BASE_URL and OPENAI_BASE_URL also work
 CODEAGENT_MODEL=deepseek-chat
+CODEAGENT_REASONING_EFFORT=medium   # minimal, low, medium, or high
+CODEAGENT_REASONING_BUDGET=8000     # extended thinking tokens (Anthropic, Gemini)
 CODEAGENT_APPROVAL=ask
 CODEAGENT_CONTEXT_WINDOW=128000
 CODEAGENT_COMPACT_AT=0.8
@@ -268,6 +281,24 @@ codedeep -provider anthropic -m claude-sonnet-4-5 "review internal/agent"
 codedeep -provider gemini -m gemini-2.5-pro "explain this repo"
 codedeep -provider ollama -m qwen2.5-coder:7b "fix the tests"
 ```
+
+### Reasoning controls
+
+Reasoning is opt-in and provider-specific:
+
+- **OpenAI-compatible** — `reasoning_effort` (`minimal`, `low`, `medium`, or
+  `high`) is sent as the `reasoning_effort` request field. Leave it empty for
+  models that do not support it.
+- **Anthropic** — `reasoning_budget_tokens` enables extended thinking with that
+  budget. `max_tokens` is raised to `budget + 4096` when needed, temperature is
+  omitted (the API requires the default), and thinking blocks are echoed back
+  with their signatures so multi-step tool use remains valid.
+- **Gemini** — `reasoning_budget_tokens` becomes
+  `generationConfig.thinkingConfig` with `includeThoughts: true`, so reasoning
+  streams to the CLI and web UI like the other providers.
+
+Budgets are clamped to 1024–64000 tokens and `0` disables extended thinking.
+`codedeep doctor` prints the active reasoning settings.
 
 ### Project instructions
 
@@ -338,7 +369,11 @@ default timeout is 10 seconds (maximum 300).
 ### Post-edit diagnostics
 
 After a tool reports a file change, CodeDeep runs each matching diagnostic
-command in the workspace and appends its output to the tool result. A pattern
+command in the workspace and appends its output to the tool result. Common
+`path:line:column: message` and `path(line,column): message` formats are also
+parsed into structured annotations: the CLI prints them as file/line/column
+rows, and the web UI renders clickable rows that open the location in your
+editor. A pattern
 without `/` matches the file name at any depth; otherwise it matches the
 workspace-relative path. `{file}` expands to the relative path and `{abs}` to
 the absolute path. Diagnostics are best effort — a non-zero exit is reported to
@@ -505,8 +540,10 @@ repository, pricing math, session persistence, search/export, and resume by
 title or id prefix, config precedence and provider presets, permission rules,
 parallel read-only tool batches, the full agent loop against a fake SSE
 provider, approval paths, compaction boundaries, multimodal message encoding,
-the Anthropic and Gemini streaming adapters, hooks and diagnostics (including
-blocking and timeouts), skill discovery and `use_skill`, background jobs and
+the Anthropic and Gemini streaming adapters (including extended-thinking and
+reasoning request bodies), hooks and diagnostics (including inline annotation
+parsing, blocking, and timeouts), per-tool usage attribution, skill discovery
+and `use_skill`, background jobs and
 their tools, editor resolution, and web authentication (bearer, cookie, login,
 and query-token flows).
 
@@ -591,6 +628,6 @@ events, so behavior stays consistent.
 
 ## Roadmap
 
-- Per-tool cost attribution inside a turn.
-- Additional provider-specific reasoning controls.
-- Richer diagnostics mapping (inline line annotations instead of appended text).
+- Parallel subagents.
+- Per-turn diff review across multiple checkpoints.
+- Provider-native prompt caching controls.

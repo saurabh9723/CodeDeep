@@ -62,7 +62,7 @@ cat > "$TMP/tier3.json" <<EOF
     ]
   },
   "diagnostics": [
-    { "pattern": "mock-output.txt", "command": "echo diag >> $TMP/hooks.log" }
+    { "pattern": "mock-output.txt", "command": "echo diag >> $TMP/hooks.log && echo mock-output.txt:1:1: error: missing header" }
   ],
   "editor": { "command": "bash", "args": ["$TMP/editor.sh", "{file}:{line}"] }
 }
@@ -110,6 +110,14 @@ for marker in pre post diag; do
     exit 1
   fi
 done
+grep -q "mock-output.txt:1:1: error: missing header" "$TMP/out.txt"
+# Structured diagnostics are rendered as file/line/column annotations
+# (distinct from the raw "path:line:col: severity: message" command output).
+grep -q "mock-output.txt:1:1 error missing header" "$TMP/out.txt"
+
+# Doctor reports the provider reasoning controls.
+"$TMP/codedeep$EXT" doctor -config "$TMP/tier3.json" >"$TMP/doctor.txt"
+grep -q "reasoning      off" "$TMP/doctor.txt"
 
 # The editor launcher resolves workspace paths and passes the line number.
 "$TMP/codedeep$EXT" open -config "$TMP/tier3.json" -cwd "$TMP/work" mock-output.txt:7 >"$TMP/open.txt"
@@ -160,6 +168,8 @@ curl -fsS "http://127.0.0.1:$WEBPORT/api/bootstrap" >"$TMP/boot.json"
 grep -q '"approval":"auto"' "$TMP/boot.json"
 grep -q '"plan":false' "$TMP/boot.json"
 grep -q '"provider":"openai"' "$TMP/boot.json"
+grep -q '"reasoning_effort":""' "$TMP/boot.json"
+grep -q '"reasoning_budget":0' "$TMP/boot.json"
 grep -q '"name":"review"' "$TMP/boot.json"
 
 # Skills are discoverable through the API and include their body on demand.

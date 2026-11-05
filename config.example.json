@@ -5,6 +5,8 @@
   "model": "deepseek-chat",
   "max_tokens": 8192,
   "temperature": 0.3,
+  "reasoning_effort": "",
+  "reasoning_budget_tokens": 0,
   "context_window": 128000,
   "compact_at": 0.8,
   "approval": "ask",

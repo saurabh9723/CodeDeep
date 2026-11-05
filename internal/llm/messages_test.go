@@ -36,6 +36,37 @@ func TestToAPIMessagesEncodesImagesAsContentParts(t *testing.T) {
 	}
 }
 
+func TestBuildBodyIncludesReasoningEffort(t *testing.T) {
+	c := NewClient("http://example.test", "k")
+	payload, err := c.buildBody(ChatRequest{
+		Model:           "m",
+		ReasoningEffort: " high ",
+		Messages:        []Message{{Role: "user", Content: "hi"}},
+	}, true)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort = %#v", body["reasoning_effort"])
+	}
+
+	payload, err = c.buildBody(ChatRequest{Model: "m", Messages: []Message{{Role: "user", Content: "hi"}}}, true)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body = nil
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Error("reasoning_effort should be omitted when unset")
+	}
+}
+
 func TestToAPIMessagesImageOnlyOmitsTextField(t *testing.T) {
 	out := toAPIMessages([]Message{{
 		Role:   "user",

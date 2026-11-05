@@ -74,6 +74,8 @@ type Config struct {
 	Model             string               `json:"model"`
 	MaxTokens         int                  `json:"max_tokens"`
 	Temperature       float64              `json:"temperature"`
+	ReasoningEffort   string               `json:"reasoning_effort,omitempty"`
+	ReasoningBudget   int                  `json:"reasoning_budget_tokens,omitempty"`
 	ContextWindow     int                  `json:"context_window"`
 	CompactAt         float64              `json:"compact_at"`
 	Approval          string               `json:"approval"`
@@ -265,6 +267,14 @@ func (c *Config) applyEnv() {
 			c.Temperature = f
 		}
 	}
+	if v := os.Getenv("CODEAGENT_REASONING_EFFORT"); v != "" {
+		c.ReasoningEffort = v
+	}
+	if v := os.Getenv("CODEAGENT_REASONING_BUDGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.ReasoningBudget = n
+		}
+	}
 	if v := os.Getenv("CODEAGENT_CONTEXT_WINDOW"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 1000 {
 			c.ContextWindow = n
@@ -370,6 +380,26 @@ func (c *Config) normalize() {
 	}
 	if c.CompactAt <= 0 || c.CompactAt >= 1 {
 		c.CompactAt = 0.8
+	}
+	c.ReasoningEffort = strings.ToLower(strings.TrimSpace(c.ReasoningEffort))
+	switch c.ReasoningEffort {
+	case "", "minimal", "low", "medium", "high":
+	default:
+		c.ReasoningEffort = ""
+	}
+	if c.ReasoningBudget < 0 {
+		c.ReasoningBudget = 0
+	}
+	if c.ReasoningBudget > 0 {
+		if c.ReasoningBudget < 1024 {
+			c.ReasoningBudget = 1024
+		}
+		if c.ReasoningBudget > 64000 {
+			c.ReasoningBudget = 64000
+		}
+		if c.Provider == "anthropic" && c.MaxTokens <= c.ReasoningBudget {
+			c.MaxTokens = c.ReasoningBudget + 4096
+		}
 	}
 	for i := range c.Permissions {
 		c.Permissions[i].Tool = strings.TrimSpace(c.Permissions[i].Tool)

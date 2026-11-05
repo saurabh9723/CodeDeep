@@ -6,15 +6,16 @@ import (
 )
 
 // Message is the transport-neutral chat message used by the agent and stored
-// in sessions. Reasoning is kept for display/history but never sent back to
-// the API.
+// in sessions. Reasoning is kept for display/history; providers that require
+// thinking blocks echoed back (Anthropic) also keep the signature.
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Reasoning  string     `json:"reasoning_content,omitempty"`
-	Images     []Image    `json:"images,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role               string     `json:"role"`
+	Content            string     `json:"content,omitempty"`
+	Reasoning          string     `json:"reasoning_content,omitempty"`
+	ReasoningSignature string     `json:"reasoning_signature,omitempty"`
+	Images             []Image    `json:"images,omitempty"`
+	ToolCalls          []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID         string     `json:"tool_call_id,omitempty"`
 }
 
 // Image is a base64-encoded user attachment. Data excludes the data-URL
@@ -52,6 +53,11 @@ type ChatRequest struct {
 	Tools       []Tool
 	MaxTokens   int
 	Temperature float64
+	// ReasoningEffort is a provider hint such as minimal, low, medium, or high.
+	ReasoningEffort string
+	// ReasoningBudget is an extended-thinking token budget for Anthropic and
+	// Gemini models.
+	ReasoningBudget int
 }
 
 type Usage struct {
@@ -68,6 +74,14 @@ func (u Usage) Add(o Usage) Usage {
 		TotalTokens:          u.TotalTokens + o.TotalTokens,
 		PromptCacheHitTokens: u.PromptCacheHitTokens + o.PromptCacheHitTokens,
 	}
+}
+
+// ToolUsage attributes model usage to the tool calls a response requested.
+// CostUSD is filled by the agent from the configured model pricing.
+type ToolUsage struct {
+	Calls   int     `json:"calls"`
+	Usage   Usage   `json:"usage"`
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 type Response struct {
