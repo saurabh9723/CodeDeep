@@ -105,17 +105,17 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		infos = append(infos, toolInfo{Name: t.Name, Description: t.Description, ReadOnly: t.ReadOnly})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"model":            s.App.Cfg.Model,
-		"base_url":         s.App.Cfg.BaseURL,
-		"workspace":        s.App.Cfg.WorkDir,
-		"approval":         s.App.Cfg.Approval,
-		"api_key_present":  s.App.Cfg.APIKeyPresent(),
-		"tools":            infos,
-		"sessions":         metas,
-		"mcp_servers":      s.App.MCPCount(),
-		"version":          "0.1.0",
-		"compact_at":       s.App.Cfg.CompactAt,
-		"context_window":   s.App.Cfg.ContextWindow,
+		"model":           s.App.Cfg.Model,
+		"base_url":        s.App.Cfg.BaseURL,
+		"workspace":       s.App.Cfg.WorkDir,
+		"approval":        s.App.Cfg.Approval,
+		"api_key_present": s.App.Cfg.APIKeyPresent(),
+		"tools":           infos,
+		"sessions":        metas,
+		"mcp_servers":     s.App.MCPCount(),
+		"version":         "0.1.0",
+		"compact_at":      s.App.Cfg.CompactAt,
+		"context_window":  s.App.Cfg.ContextWindow,
 	})
 }
 

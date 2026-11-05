@@ -229,9 +229,9 @@ type apiDelta struct {
 }
 
 type apiChoice struct {
-	Index        int      `json:"index"`
-	Delta        apiDelta `json:"delta"`
-	Message      struct {
+	Index   int      `json:"index"`
+	Delta   apiDelta `json:"delta"`
+	Message struct {
 		Role             string     `json:"role"`
 		Content          string     `json:"content"`
 		ReasoningContent string     `json:"reasoning_content"`

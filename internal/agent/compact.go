@@ -80,10 +80,10 @@ func (a *Agent) compact(ctx context.Context, msgs *[]llm.Message, sess *session.
 
 	after := llm.EstimatedTokens(*msgs)
 	a.emit.Emit(Event{
-		Type:    EventCompact,
+		Type:      EventCompact,
 		SessionID: sessionID(sess),
-		Depth:   a.depth,
-		Message: fmt.Sprintf("Compacted %d earlier messages into a summary (about %d → %d tokens)%s", len(old), before, after, note),
+		Depth:     a.depth,
+		Message:   fmt.Sprintf("Compacted %d earlier messages into a summary (about %d → %d tokens)%s", len(old), before, after, note),
 	})
 	a.save(sess)
 }

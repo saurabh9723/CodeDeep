@@ -1,0 +1,22 @@
+{
+  "api_key": "",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-chat",
+  "max_tokens": 8192,
+  "temperature": 0.3,
+  "context_window": 128000,
+  "compact_at": 0.8,
+  "approval": "ask",
+  "sessions_dir": "",
+  "shell": "",
+  "max_steps": 60,
+  "allow_outside": false,
+  "web_addr": "127.0.0.1:7777",
+  "debug": false,
+  "mcp_servers": {},
+  "instruction_files": [
+    "AGENTS.md",
+    "CODEAGENT.md",
+    ".codedeep/AGENTS.md"
+  ]
+}
