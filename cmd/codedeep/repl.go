@@ -351,6 +351,9 @@ func (r *repl) command(line string) bool {
 	case "/status":
 		r.printStatus()
 
+	case "/stats":
+		r.runStats(arg)
+
 	case "/tools":
 		r.printTools()
 
@@ -408,6 +411,7 @@ func (r *repl) printHelp() {
 		{"/memory [query]", "list or search durable project notes"},
 		{"/reasoning", "toggle the reasoning stream"},
 		{"/status", "session and runtime status"},
+		{"/stats [days] [scope]", "token, cost, cache, and tool activity"},
 		{"/tools", "list available tools"},
 		{"/skills", "list workspace skills"},
 		{"/skill <name> [task]", "load a skill and run it on a task"},

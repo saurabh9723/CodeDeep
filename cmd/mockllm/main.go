@@ -418,11 +418,14 @@ func usageFor(req chatRequest, completion string) map[string]any {
 		prompt += 4 + len(m.text())/4
 	}
 	completionTokens := len(completion)/4 + 8
+	// Report some cache reads/writes so analytics and pricing paths are
+	// exercised by the mock instead of always showing a 0% hit rate.
 	return map[string]any{
-		"prompt_tokens":           prompt,
-		"completion_tokens":       completionTokens,
-		"total_tokens":            prompt + completionTokens,
-		"prompt_cache_hit_tokens": 0,
+		"prompt_tokens":             prompt,
+		"completion_tokens":         completionTokens,
+		"total_tokens":              prompt + completionTokens,
+		"prompt_cache_hit_tokens":   prompt / 2,
+		"prompt_cache_write_tokens": prompt / 10,
 	}
 }
 

@@ -32,6 +32,19 @@ type Session struct {
 	// Todos is the agent's working plan for this session. It survives turns
 	// and compaction so long tasks keep their structure.
 	Todos []Todo `json:"todos,omitempty"`
+	// TurnStats records the model usage and tool activity of recent user turns
+	// so analytics can chart activity over time instead of only totals.
+	TurnStats []TurnStat `json:"turn_stats,omitempty"`
+}
+
+// TurnStat is one user turn's model usage and per-tool attribution. Time is
+// when the turn started. Tools only contains tools the model requested during
+// that turn.
+type TurnStat struct {
+	Turn  int                      `json:"turn"`
+	Time  time.Time                `json:"time"`
+	Usage llm.Usage                `json:"usage"`
+	Tools map[string]llm.ToolUsage `json:"tools,omitempty"`
 }
 
 // Todo is one item in the session's working plan.
@@ -177,7 +190,9 @@ func (s *Store) Delete(id string) error {
 	return os.Remove(path)
 }
 
-func (s *Store) List() ([]Meta, error) {
+// All loads every session, newest first. Unreadable session files are skipped
+// so one corrupt file cannot hide the rest.
+func (s *Store) All() ([]*Session, error) {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -185,7 +200,7 @@ func (s *Store) List() ([]Meta, error) {
 		}
 		return nil, err
 	}
-	metas := make([]Meta, 0, len(entries))
+	sessions := make([]*Session, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -195,6 +210,19 @@ func (s *Store) List() ([]Meta, error) {
 		if err != nil {
 			continue
 		}
+		sessions = append(sessions, sess)
+	}
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Updated.After(sessions[j].Updated) })
+	return sessions, nil
+}
+
+func (s *Store) List() ([]Meta, error) {
+	sessions, err := s.All()
+	if err != nil {
+		return nil, err
+	}
+	metas := make([]Meta, 0, len(sessions))
+	for _, sess := range sessions {
 		metas = append(metas, Meta{
 			ID:           sess.ID,
 			Title:        sess.Title,
@@ -206,7 +234,6 @@ func (s *Store) List() ([]Meta, error) {
 			TotalTokens:  sess.Usage.TotalTokens,
 		})
 	}
-	sort.Slice(metas, func(i, j int) bool { return metas[i].Updated.After(metas[j].Updated) })
 	return metas, nil
 }
 

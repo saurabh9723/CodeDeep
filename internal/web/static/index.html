@@ -83,6 +83,9 @@
           <button class="icon-btn" id="undoBtn" title="Review checkpoints and roll back" aria-label="Review checkpoints and roll back" hidden>
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-1"/></svg>
           </button>
+          <button class="icon-btn" id="statsBtn" title="Observability" aria-label="Observability">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 20V10M10 20V4M16 20v-7M22 20V7"/></svg>
+          </button>
           <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
           </button>
@@ -193,6 +196,66 @@
   </div>
 
   <div class="toast" id="toast" hidden></div>
+
+  <div class="stats-overlay" id="statsOverlay" hidden>
+    <section class="stats-modal" role="dialog" aria-modal="true" aria-labelledby="statsTitle">
+      <header class="stats-head">
+        <div class="stats-heading">
+          <h2 id="statsTitle">Observability</h2>
+          <span class="stats-sub" id="statsSub"></span>
+        </div>
+        <div class="stats-controls">
+          <label class="stats-select">Range
+            <select id="statsDays">
+              <option value="7">7 days</option>
+              <option value="30" selected>30 days</option>
+              <option value="90">90 days</option>
+              <option value="365">1 year</option>
+            </select>
+          </label>
+          <label class="stats-select">Scope
+            <select id="statsScope">
+              <option value="all">All workspaces</option>
+              <option value="workspace">This workspace</option>
+            </select>
+          </label>
+          <button class="icon-btn" id="statsRefreshBtn" title="Refresh" aria-label="Refresh">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 11a8 8 0 10-2.3 5.7M20 5v6h-6"/></svg>
+          </button>
+          <button class="icon-btn" id="statsCloseBtn" title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="stats-body" id="statsBody">
+        <div class="stats-cards" id="statsCards"></div>
+        <div class="stats-grid">
+          <section class="stats-card stats-wide">
+            <div class="stats-card-head"><span>Tokens per day</span><span class="stats-card-sub" id="statsChartSub"></span></div>
+            <div class="stats-chart" id="statsChart"></div>
+            <div class="stats-axis"><span id="statsAxisStart"></span><span id="statsAxisEnd"></span></div>
+          </section>
+          <section class="stats-card">
+            <div class="stats-card-head"><span>Prompt cache</span></div>
+            <div class="stats-cache" id="statsCache"></div>
+          </section>
+          <section class="stats-card">
+            <div class="stats-card-head"><span>Models</span></div>
+            <div class="stats-models" id="statsModels"></div>
+          </section>
+          <section class="stats-card stats-wide">
+            <div class="stats-card-head"><span>Tools</span><span class="stats-card-sub">calls by hour</span></div>
+            <div class="stats-tools" id="statsTools"></div>
+          </section>
+          <section class="stats-card stats-wide">
+            <div class="stats-card-head"><span>Recent sessions</span></div>
+            <div class="stats-sessions" id="statsSessions"></div>
+          </section>
+        </div>
+      </div>
+    </section>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

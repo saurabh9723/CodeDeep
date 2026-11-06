@@ -33,6 +33,9 @@ const (
 	maxDiffPreviewBytes = 64 << 10
 	maxCheckpointDiff   = 64 << 10
 	maxParallelTools    = 4
+	// maxTurnStats bounds the per-session analytics history. The dashboard
+	// windows it by time; older turns are dropped so session files stay small.
+	maxTurnStats = 200
 )
 
 var approvalCounter atomic.Int64
@@ -186,14 +189,18 @@ func (a *Agent) RunWithImages(ctx context.Context, sess *session.Session, prompt
 	a.session = sess
 	a.turnUsage = llm.Usage{}
 	a.turnTools = map[string]llm.ToolUsage{}
+	turnStarted := time.Now().UTC()
 	a.approval = a.cfg.ApprovalMode()
 	a.resetVerification()
 	sess.Checkpoints = append(sess.Checkpoints, session.Checkpoint{
 		Turn: sess.Turns,
-		Time: time.Now().UTC(),
+		Time: turnStarted,
 	})
 	a.checkpoint = &sess.Checkpoints[len(sess.Checkpoints)-1]
-	defer a.finishCheckpoint(sess)
+	defer func() {
+		a.finishCheckpoint(sess)
+		a.recordTurnStats(sess, turnStarted)
+	}()
 
 	a.emitEvent(Event{Type: EventUser, SessionID: sess.ID, Text: prompt, Images: images})
 	a.save(sess)
@@ -1000,9 +1007,6 @@ func (a *Agent) recordToolUsage(calls []llm.ToolCall, callUsage []llm.ToolUsage,
 	}
 	for i, tc := range calls {
 		u := usageAt(callUsage, i)
-		if u.Usage.TotalTokens == 0 {
-			continue
-		}
 		u.CostUSD = a.costOf(u.Usage)
 		if i < len(callUsage) {
 			callUsage[i] = u
@@ -1024,6 +1028,34 @@ func (a *Agent) recordToolUsage(calls []llm.ToolCall, callUsage []llm.ToolUsage,
 			sess.ToolUsage[name] = total
 		}
 	}
+}
+
+// recordTurnStats persists one user turn's usage and tool attribution for the
+// analytics dashboard. Subagent usage is already folded into turnUsage by the
+// time the turn ends; the stats lock also covers that write.
+func (a *Agent) recordTurnStats(sess *session.Session, started time.Time) {
+	if sess == nil {
+		return
+	}
+	a.locks.stats.Lock()
+	usage := a.turnUsage
+	tools := make(map[string]llm.ToolUsage, len(a.turnTools))
+	for name, u := range a.turnTools {
+		tools[name] = u
+	}
+	a.locks.stats.Unlock()
+	if usage.TotalTokens == 0 && len(tools) == 0 {
+		return
+	}
+	stat := session.TurnStat{Turn: sess.Turns, Time: started, Usage: usage}
+	if len(tools) > 0 {
+		stat.Tools = tools
+	}
+	sess.TurnStats = append(sess.TurnStats, stat)
+	if len(sess.TurnStats) > maxTurnStats {
+		sess.TurnStats = append([]session.TurnStat(nil), sess.TurnStats[len(sess.TurnStats)-maxTurnStats:]...)
+	}
+	a.save(sess)
 }
 
 func (a *Agent) costOf(u llm.Usage) float64 {

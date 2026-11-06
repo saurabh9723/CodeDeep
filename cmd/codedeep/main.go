@@ -43,6 +43,8 @@ func dispatch(args []string) int {
 			return cmdDoctor(args[1:])
 		case "sessions":
 			return cmdSessions(args[1:])
+		case "stats":
+			return cmdStats(args[1:])
 		case "open":
 			return cmdOpen(args[1:])
 		case "version", "--version", "-version", "-v":
@@ -75,6 +77,8 @@ Usage:
   codedeep sessions            list saved sessions
   codedeep sessions -q parser  search titles and transcripts
   codedeep sessions -export ID export a session as markdown or JSON
+  codedeep stats               token, cost, cache, and tool activity
+  codedeep stats -days 7 -workspace -json
   codedeep open src/main.go:42 open a file in your editor
   codedeep version             print version information
 
@@ -507,6 +511,7 @@ func cmdDoctor(args []string) int {
 	fmt.Printf("verify         %s\n", verifyCommand)
 	mem := memory.New(cfg.WorkDir, cfg.Home)
 	fmt.Printf("memory         %d notes\n", len(mem.List()))
+	fmt.Printf("activity       %s\n", doctorStats(cfg))
 
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	reg := tools.NewRegistry()

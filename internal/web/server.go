@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"codedeep/internal/agent"
+	"codedeep/internal/analytics"
 	"codedeep/internal/app"
 	"codedeep/internal/approval"
 	"codedeep/internal/llm"
@@ -57,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
+	mux.HandleFunc("GET /api/analytics", s.handleAnalytics)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", s.handleStreamRun)
@@ -162,6 +164,25 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"plan":             approval == "plan",
 		"pricing":          s.App.Cfg.Pricing,
 	})
+}
+
+func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	days := analytics.DefaultDays
+	if raw := strings.TrimSpace(q.Get("days")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "days must be an integer")
+			return
+		}
+		days = n
+	}
+	rep, err := analytics.Build(s.App.Cfg, analytics.Options{Days: days, Scope: q.Get("scope")})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
 
 func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {

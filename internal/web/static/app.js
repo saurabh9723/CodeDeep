@@ -30,6 +30,7 @@ const state = {
   files: { open: false, mention: false, path: '', seq: 0 },
   palette: { open: false, items: [], index: 0 },
   images: [],
+  stats: { open: false, loading: false, pending: false, timer: null },
 };
 
 const chat = $('#chat');
@@ -93,6 +94,20 @@ function bindUI() {
   $('#newChatBtn').addEventListener('click', newChat);
   $('#refreshBtn').addEventListener('click', refreshSessions);
   $('#themeBtn').addEventListener('click', toggleTheme);
+  $('#statsBtn').addEventListener('click', openStats);
+  $('#statsCloseBtn').addEventListener('click', closeStats);
+  $('#statsRefreshBtn').addEventListener('click', loadStats);
+  $('#statsOverlay').addEventListener('click', (e) => {
+    if (e.target === $('#statsOverlay')) closeStats();
+  });
+  $('#statsDays').addEventListener('change', () => {
+    localStorage.setItem('codedeep-stats-days', $('#statsDays').value);
+    loadStats();
+  });
+  $('#statsScope').addEventListener('change', () => {
+    localStorage.setItem('codedeep-stats-scope', $('#statsScope').value);
+    loadStats();
+  });
   $('#planChip').addEventListener('click', togglePlan);
   $('#undoBtn').addEventListener('click', openCheckpoints);
   $('#checkpointsCloseBtn').addEventListener('click', closeCheckpoints);
@@ -217,6 +232,9 @@ function bindUI() {
       } else if (!$('#checkpointPalette').hidden) {
         e.preventDefault();
         closeCheckpoints();
+      } else if (state.stats.open) {
+        e.preventDefault();
+        closeStats();
       } else if (state.running) {
         e.preventDefault();
         stopRun();
@@ -1124,6 +1142,7 @@ async function handleEvent(ev) {
       if (ev.message === 'stopped') addNote('Stopped by user', 'warn');
       if (typeof ev.checkpoints === 'number') setCheckpoints(ev.checkpoints);
       addToolUsage(ev.tool_usage);
+      scheduleStatsRefresh();
       break;
     default:
       break;
@@ -2357,6 +2376,268 @@ function relTime(iso) {
   const days = Math.floor(hours / 24);
   if (days < 7) return days + 'd ago';
   return new Date(iso).toLocaleDateString();
+}
+
+/* ------------------------------------------------------------------ *
+ * observability dashboard
+ * ------------------------------------------------------------------ */
+
+function openStats() {
+  if (state.stats.open) return;
+  state.stats.open = true;
+  restoreStatsPrefs();
+  $('#statsOverlay').hidden = false;
+  document.body.classList.add('stats-open');
+  loadStats();
+}
+
+function closeStats() {
+  state.stats.open = false;
+  state.stats.pending = false;
+  clearTimeout(state.stats.timer);
+  state.stats.timer = null;
+  $('#statsOverlay').hidden = true;
+  document.body.classList.remove('stats-open');
+  input.focus();
+}
+
+function restoreStatsPrefs() {
+  const days = localStorage.getItem('codedeep-stats-days');
+  if (days && Array.from($('#statsDays').options).some((o) => o.value === days)) {
+    $('#statsDays').value = days;
+  }
+  const scope = localStorage.getItem('codedeep-stats-scope');
+  if (scope && Array.from($('#statsScope').options).some((o) => o.value === scope)) {
+    $('#statsScope').value = scope;
+  }
+}
+
+function scheduleStatsRefresh() {
+  if (!state.stats.open) return;
+  clearTimeout(state.stats.timer);
+  state.stats.timer = setTimeout(() => {
+    state.stats.timer = null;
+    loadStats();
+  }, 500);
+}
+
+async function loadStats() {
+  if (!state.stats.open) return;
+  if (state.stats.loading) {
+    state.stats.pending = true;
+    return;
+  }
+  state.stats.loading = true;
+  $('#statsBody').classList.add('busy');
+  const days = Number($('#statsDays').value) || 30;
+  const scope = $('#statsScope').value || 'all';
+  try {
+    const rep = await api(`/api/analytics?days=${days}&scope=${encodeURIComponent(scope)}`);
+    renderStats(rep);
+  } catch (err) {
+    $('#statsSub').textContent = 'could not load analytics';
+    toast('Analytics failed: ' + err.message);
+  } finally {
+    state.stats.loading = false;
+    $('#statsBody').classList.remove('busy');
+    if (state.stats.pending) {
+      state.stats.pending = false;
+      loadStats();
+    }
+  }
+}
+
+function renderStats(rep) {
+  const s = rep.summary || {};
+  const scope = rep.scope === 'workspace' ? 'this workspace' : 'all workspaces';
+  const when = rep.generated ? new Date(rep.generated).toLocaleString() : '';
+  $('#statsSub').textContent = `last ${rep.days} days · ${scope}${when ? ' · updated ' + when : ''}`;
+  renderStatsCards(rep);
+  renderStatsChart(rep.daily || []);
+  renderCachePanel(s);
+  renderModels(rep.models || [], rep.priced);
+  renderTools(rep.tools || [], rep.heatmap || []);
+  renderStatsSessions(rep.sessions || [], rep.priced);
+}
+
+function renderStatsCards(rep) {
+  const s = rep.summary || {};
+  const cards = $('#statsCards');
+  cards.innerHTML = '';
+  const cost = rep.priced ? fmtCost(s.cost_usd) || '~$0' : 'n/a';
+  const add = (label, value, sub, title) => {
+    const card = el('div', 'stats-card stats-metric');
+    card.append(el('span', 'stats-metric-label', label));
+    card.append(el('span', 'stats-metric-value', value));
+    card.append(el('span', 'stats-metric-sub', sub));
+    if (title) card.title = title;
+    cards.append(card);
+  };
+  add('Sessions', String(s.sessions || 0), `${s.turns || 0} turns · ${s.active_days || 0} active days`);
+  add(
+    'Tokens',
+    fmtShort(s.total_tokens),
+    `↑ ${fmtShort(s.prompt_tokens)} · ↓ ${fmtShort(s.completion_tokens)}`,
+    `${s.prompt_tokens || 0} prompt, ${s.completion_tokens || 0} completion`
+  );
+  const rate = s.prompt_tokens ? Math.round((s.cache_hit_rate || 0) * 100) : 0;
+  add(
+    'Cache hit',
+    s.prompt_tokens ? rate + '%' : '—',
+    `${fmtShort(s.cache_hit_tokens)} read · ${fmtShort(s.cache_write_tokens)} written`,
+    s.prompt_tokens ? `${s.cache_hit_tokens || 0} of ${s.prompt_tokens} prompt tokens came from cache` : 'no prompt tokens recorded'
+  );
+  add('Cost', cost, rep.priced ? 'estimated' : 'no pricing configured');
+  add('Tool calls', String(s.tool_calls || 0), `${(rep.tools || []).length} tool${(rep.tools || []).length === 1 ? '' : 's'} used`);
+}
+
+function renderStatsChart(days) {
+  const chart = $('#statsChart');
+  chart.innerHTML = '';
+  $('#statsChartSub').textContent = '';
+  $('#statsAxisStart').textContent = '';
+  $('#statsAxisEnd').textContent = '';
+  if (!days.length) {
+    chart.append(el('div', 'stats-empty', 'No days in this range.'));
+    return;
+  }
+  const max = Math.max(1, ...days.map((d) => Number(d.total_tokens) || 0));
+  const total = days.reduce((sum, d) => sum + (Number(d.total_tokens) || 0), 0);
+  if (total) $('#statsChartSub').textContent = fmtShort(total) + ' tok';
+  $('#statsAxisStart').textContent = days[0].date;
+  $('#statsAxisEnd').textContent = days[days.length - 1].date;
+  for (const day of days) {
+    const tokens = Number(day.total_tokens) || 0;
+    const col = el('div', 'stats-chart-col' + (tokens ? '' : ' empty'));
+    const bar = el('div', 'stats-bar');
+    bar.style.height = Math.max(2, Math.round((tokens / max) * 100)) + '%';
+    col.append(bar);
+    const cost = Number(day.cost_usd) > 0 ? ' · ' + fmtCost(day.cost_usd) : '';
+    col.title = `${day.date}: ${fmtShort(tokens)} tok · ${day.turns || 0} turns · ${day.tool_calls || 0} tool calls${cost}`;
+    chart.append(col);
+  }
+}
+
+function renderCachePanel(s) {
+  const box = $('#statsCache');
+  box.innerHTML = '';
+  const prompt = Number(s.prompt_tokens) || 0;
+  const hit = Number(s.cache_hit_tokens) || 0;
+  const write = Number(s.cache_write_tokens) || 0;
+  if (!prompt) {
+    box.append(el('div', 'stats-empty', 'No prompt tokens recorded yet.'));
+    return;
+  }
+  const rate = Math.max(0, Math.min(1, hit / prompt));
+  const bar = el('div', 'stats-cache-bar');
+  const used = el('div', 'stats-cache-hit');
+  used.style.width = (rate * 100).toFixed(1) + '%';
+  bar.append(used);
+  box.append(bar);
+  const rows = el('div', 'stats-cache-rows');
+  const row = (label, value) => {
+    const r = el('div', 'stats-cache-row');
+    r.append(el('span', null, label));
+    r.append(el('b', null, value));
+    return r;
+  };
+  const miss = Math.max(0, prompt - hit - write);
+  rows.append(
+    row('Cache hit rate', (rate * 100).toFixed(1) + '%'),
+    row('Read from cache', fmtShort(hit) + ' tok'),
+    row('Written to cache', fmtShort(write) + ' tok'),
+    row('Billed as input', fmtShort(miss) + ' tok')
+  );
+  box.append(rows);
+}
+
+function renderModels(models, priced) {
+  const box = $('#statsModels');
+  box.innerHTML = '';
+  if (!models.length) {
+    box.append(el('div', 'stats-empty', 'No model activity in this range.'));
+    return;
+  }
+  for (const m of models) {
+    const row = el('div', 'stats-model-row');
+    row.append(el('span', 'stats-model-name', m.model || 'unknown'));
+    const parts = [`${m.turns || 0} turns`, `${fmtShort(m.total_tokens)} tok`];
+    if (m.sessions) parts.push(`${m.sessions} session${m.sessions === 1 ? '' : 's'}`);
+    parts.push(`${Math.round((m.cache_hit_rate || 0) * 100)}% cached`);
+    row.append(el('span', 'stats-model-meta', parts.join(' · ')));
+    if (priced) row.append(el('span', 'stats-model-cost', fmtCost(m.cost_usd) || '~$0'));
+    box.append(row);
+  }
+}
+
+function renderTools(tools, heatmap) {
+  const box = $('#statsTools');
+  box.innerHTML = '';
+  if (!tools.length) {
+    box.append(el('div', 'stats-empty', 'No tool calls in this range.'));
+    return;
+  }
+  const heat = new Map((heatmap || []).map((row) => [row.name, row.calls || []]));
+  for (const t of tools) {
+    const cell = el('div', 'stats-tool');
+    const head = el('div', 'stats-tool-head');
+    head.append(el('span', 'stats-tool-name', t.name));
+    const parts = [`${t.calls || 0} calls`, `${fmtShort(t.tokens)} tok`];
+    if (t.sessions) parts.push(`${t.sessions} session${t.sessions === 1 ? '' : 's'}`);
+    if (t.cost_usd > 0) parts.push(fmtCost(t.cost_usd));
+    head.append(el('span', 'stats-tool-meta', parts.join(' · ')));
+    cell.append(head);
+    const calls = heat.get(t.name);
+    if (calls && calls.length) {
+      const max = Math.max(1, ...calls);
+      const grid = el('div', 'stats-heat');
+      calls.forEach((n, hour) => {
+        const c = el('div', 'heat-cell');
+        if (n > 0) {
+          const pct = Math.round(18 + (n / max) * 82);
+          c.style.background = `color-mix(in srgb, var(--accent) ${pct}%, var(--panel-2))`;
+        }
+        c.title = `${hour}:00 — ${n} call${n === 1 ? '' : 's'}`;
+        grid.append(c);
+      });
+      cell.append(grid);
+    }
+    box.append(cell);
+  }
+  const hours = el('div', 'stats-heat-hours');
+  for (let h = 0; h < 24; h++) hours.append(el('span', null, h % 6 === 0 ? String(h) : ''));
+  box.append(hours);
+}
+
+function renderStatsSessions(sessions, priced) {
+  const box = $('#statsSessions');
+  box.innerHTML = '';
+  if (!sessions.length) {
+    box.append(el('div', 'stats-empty', 'No sessions in this range.'));
+    return;
+  }
+  for (const sess of sessions) {
+    const row = el('button', 'stats-session-row');
+    row.type = 'button';
+    row.title = 'Open ' + (sess.title || sess.id);
+    row.append(el('span', 'stats-session-title', sess.title || sess.id));
+    const meta = [
+      sess.model,
+      relTime(sess.updated),
+      `${sess.turns || 0} turns`,
+      `${fmtShort(sess.total_tokens)} tok`,
+      `${Math.round((sess.cache_hit_rate || 0) * 100)}% cached`,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    row.append(el('span', 'stats-session-meta', meta));
+    if (priced) row.append(el('span', 'stats-session-cost', fmtCost(sess.cost_usd) || '~$0'));
+    row.addEventListener('click', () => {
+      closeStats();
+      loadSession(sess.id);
+    });
+    box.append(row);
+  }
 }
 
 async function api(path, opts = {}) {

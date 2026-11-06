@@ -53,6 +53,10 @@ the browser.
   to two levels; their token usage counts toward the session.
 - **Cost estimates** — optional per-model pricing in the config; the CLI and
   web UI show token totals and estimated USD per step, turn, and session.
+- **Observability** — `codedeep stats` and the web dashboard aggregate saved
+  sessions into token/cost trends, prompt-cache hit rates, per-model breakdowns,
+  tool call counts, and a 24-hour tool heatmap. Sessions record per-turn usage,
+  so the report is bucketed by when the work actually happened.
 - **MCP** — starts stdio JSON-RPC servers and exposes their tools as
   `mcp__<server>__<tool>`; `readOnlyHint` tools skip approval.
 - **Sessions** — saved after every step, resumable by id, number, or title,
@@ -138,7 +142,8 @@ echo "summarize the last commit" | ./bin/codedeep -p -
 REPL commands: `/help`, `/new`, `/sessions [query]`, `/resume <id|#|title>`,
 `/export [md|json] [path]`, `/title`, `/model`, `/models`, `/approval`,
 `/plan [on|off]`, `/checkpoints`, `/checkpoint <n>`, `/undo [n]`, `/todos`,
-`/memory [query]`, `/reasoning`, `/status`, `/tools`, `/compact`, `/skills`,
+`/memory [query]`, `/reasoning`, `/status`, `/stats [days] [workspace|all]`,
+`/tools`, `/compact`, `/skills`,
 `/skill <name> [task]`, `/jobs`, `/job <id>`, `/kill <id>`,
 `/open [path[:line]]`, `/clear`, `/quit`.
 
@@ -147,6 +152,7 @@ Sessions can also be searched and exported without entering the REPL:
 ```bash
 ./bin/codedeep sessions -q "flaky test"
 ./bin/codedeep sessions -export "parser refactor" -format md -o notes.md
+./bin/codedeep stats -days 7 -workspace
 ```
 
 ### Web UI
@@ -161,7 +167,12 @@ composer, type `@` (or click the folder button) to browse and mention files,
 `/` for commands such as `/compact`, `/export`, `/skills`, `/skill`, `/open`, and
 paste or drag images to attach them. The sidebar search matches session titles
 and transcript text; the export button downloads Markdown or JSON. File-picker
-rows have an `↗` action that opens the file in your editor.
+rows have an `↗` action that opens the file in your editor. The activity button
+in the top bar opens the observability dashboard: session/turn/token/cost
+summary cards, a daily token chart, cache hit breakdown, per-model and per-tool
+usage with an hourly heatmap, and recent sessions that open on click. The range
+(7/30/90/365 days) and scope (all workspaces or this one) are saved in the
+browser, and the dashboard refreshes after each completed turn.
 
 Set `web_token` (or `CODEAGENT_WEB_TOKEN`) to require sign-in. The server also
 refuses to listen on a non-loopback address without a token unless
@@ -199,7 +210,21 @@ delay. Client errors such as 401 and 400 are never retried.
 ./bin/codedeep doctor -ping    # verify the provider connection and list models
 ./bin/codedeep sessions        # list saved sessions
 ./bin/codedeep sessions -json -workspace
+./bin/codedeep stats           # tokens, cost, cache hits, and tools (30 days)
+./bin/codedeep stats -days 7 -workspace -json
 ```
+
+### Observability
+
+`stats` reads every saved session and aggregates the requested window. Sessions
+written by the current agent store per-turn usage (`turn_stats`), which lets the
+report bucket tokens, cost, and tool calls by day and hour; older sessions fall
+back to their session totals attributed to the last-updated day. Prompt-cache
+hit rate is `cache_hit_tokens / prompt_tokens`, and cost uses each session's own
+model pricing, so mixed-model history is priced correctly. The same report is
+available at `GET /api/analytics?days=30&scope=all|workspace` and powers the web
+dashboard. When no model pricing is configured the report still shows tokens and
+cache metrics and marks cost as unavailable.
 
 ## Common flags
 
@@ -662,14 +687,18 @@ reset on buffer overflow), concurrent-run rejection and stop, web
 authentication (bearer, cookie, login, and query-token flows), the session plan
 tool and prompt injection, durable memory scoping/search/limits and its tools,
 and the verification gate (passing, failure feedback, the two-attempt cap, and
-skipping turns that changed nothing).
+skipping turns that changed nothing). Analytics have dedicated fixtures for
+daily bucketing, range and workspace filters, cache-hit math, per-model and
+per-tool aggregation, the hourly heatmap, legacy sessions without per-turn
+stats, and the `/api/analytics` endpoint.
 
 End-to-end smoke test (builds the binaries, starts the deterministic mock model,
 runs tool turns, and checks files and sessions on disk). It also proves provider
 retries against a rate-limited mock, that a run survives a dropped connection
 and can be reattached and stopped, the auth/plan/undo/checkpoint flows, the
 verification gate (including the retry cap), plan persistence and `/todos`,
-durable memory across runs, `/memory`, and the new `doctor` lines:
+durable memory across runs, `/memory`, the `stats` report and analytics API,
+and the new `doctor` lines:
 
 ```bash
 bash scripts/e2e-smoke.sh
@@ -719,6 +748,7 @@ internal/mcp      stdio JSON-RPC client and tool registration
 internal/hooks    pre/post tool shell hooks
 internal/diagnostics post-edit build, vet, and lint commands
 internal/memory   durable project/global notes and the remember/recall/forget tools
+internal/analytics session aggregation for token/cost/cache/tool observability
 internal/verify   end-of-turn verification command runner
 internal/skills   markdown skill discovery and the use_skill tool
 internal/jobs     background process manager and job tools

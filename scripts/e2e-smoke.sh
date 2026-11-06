@@ -183,6 +183,21 @@ SESS_FILE=$(ls "$TMP"/sessions/*.json | head -n 1)
 SID=$(basename "$SESS_FILE" .json)
 grep -q '"checkpoints"' "$SESS_FILE"
 grep -q 'mock-output.txt' "$SESS_FILE"
+grep -q '"turn_stats"' "$SESS_FILE"
+grep -q '"prompt_cache_hit_tokens":' "$SESS_FILE"
+
+# Observability: the CLI aggregates saved sessions into a token/cost/cache
+# report, and the JSON form is machine-readable.
+CODEAGENT_SESSIONS_DIR="$TMP/sessions" \
+  "$TMP/codedeep$EXT" stats -config "$TMP/tier3.json" -days 7 >"$TMP/stats.txt"
+grep -q "Observability" "$TMP/stats.txt"
+grep -q "cache" "$TMP/stats.txt"
+grep -q "Tools" "$TMP/stats.txt"
+CODEAGENT_SESSIONS_DIR="$TMP/sessions" \
+  "$TMP/codedeep$EXT" stats -config "$TMP/tier3.json" -days 7 -json >"$TMP/stats.json"
+grep -q '"summary"' "$TMP/stats.json"
+grep -q '"cache_hit_rate":' "$TMP/stats.json"
+grep -q '"tools": \[' "$TMP/stats.json"
 
 # Deeper agent capabilities: the plan tool, durable memory, and the automatic
 # verification gate.
@@ -232,12 +247,14 @@ grep -q '"todos": \[' "$TODO_FILE"
 grep -q '"text": "inspect the workspace"' "$TODO_FILE"
 grep -q '"status": "completed"' "$TODO_FILE"
 grep -q '"status": "in_progress"' "$TODO_FILE"
-printf '/todos\n/quit\n' | env DEEPSEEK_API_KEY=test \
+printf '/todos\n/stats 7\n/quit\n' | env DEEPSEEK_API_KEY=test \
   CODEAGENT_BASE_URL="http://127.0.0.1:$TODOPORT" \
   CODEAGENT_SESSIONS_DIR="$TMP/todo-sessions" \
   "$TMP/codedeep$EXT" -cwd "$TMP/todo-work" -resume last -plain >"$TMP/todo-repl.txt"
 grep -q "Plan" "$TMP/todo-repl.txt"
 grep -q "\[~\] write the mock build command" "$TMP/todo-repl.txt"
+grep -q "Observability" "$TMP/todo-repl.txt"
+grep -q "cache" "$TMP/todo-repl.txt"
 
 # Durable memory survives the session: a note is written under the workspace,
 # read back through recall, and listed by the REPL and doctor.
@@ -305,6 +322,20 @@ grep -q '"reasoning_effort":""' "$TMP/boot.json"
 grep -q '"reasoning_budget":0' "$TMP/boot.json"
 grep -q '"prompt_cache":true' "$TMP/boot.json"
 grep -q '"name":"review"' "$TMP/boot.json"
+
+# Observability dashboard data: aggregated daily activity, cache metrics, and
+# tool breakdowns. Bad ranges are rejected.
+curl -fsS "http://127.0.0.1:$WEBPORT/api/analytics?days=7&scope=workspace" >"$TMP/analytics.json"
+grep -q '"summary"' "$TMP/analytics.json"
+grep -q '"cache_hit_rate":' "$TMP/analytics.json"
+grep -q '"tools":\[' "$TMP/analytics.json"
+grep -q '"daily":\[' "$TMP/analytics.json"
+grep -q "\"id\":\"$SID\"" "$TMP/analytics.json"
+ANALYTICS_BAD=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEBPORT/api/analytics?days=soon")
+if [ "$ANALYTICS_BAD" != "400" ]; then
+  echo "invalid analytics days should return 400, got $ANALYTICS_BAD" >&2
+  exit 1
+fi
 
 # Skills are discoverable through the API and include their body on demand.
 curl -fsS "http://127.0.0.1:$WEBPORT/api/skills" >"$TMP/skills.json"

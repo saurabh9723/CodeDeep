@@ -555,7 +555,13 @@ func (c *Config) APIKeyPresent() bool {
 // UsageCost estimates the USD cost of a usage record for the current model.
 // The boolean is false when no pricing is configured for the model.
 func (c *Config) UsageCost(u llm.Usage) (float64, bool) {
-	p, ok := c.Pricing[c.Model]
+	return c.CostFor(c.Model, u)
+}
+
+// CostFor estimates the USD cost of a usage record for a specific model. It is
+// used by analytics, which prices historical turns with each session's model.
+func (c *Config) CostFor(model string, u llm.Usage) (float64, bool) {
+	p, ok := c.Pricing[model]
 	if !ok || (p.InputPerMTok == 0 && p.OutputPerMTok == 0) {
 		return 0, false
 	}
