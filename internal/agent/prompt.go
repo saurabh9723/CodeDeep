@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"codedeep/internal/config"
+	"codedeep/internal/session"
 	"codedeep/internal/skills"
 	"codedeep/internal/tools"
 )
@@ -46,6 +47,7 @@ func BuildSystemPrompt(cfg *config.Config, depth int, catalog *skills.Catalog) s
 - Use git_status and git_diff to understand uncommitted changes before reviewing or modifying code.
 - Keep changes focused and consistent with the existing code. Do not refactor unrelated code.
 - After changing code, verify it when practical (build, type-check, tests) and report the actual result.
+- Save durable project facts (build commands, conventions, decisions, gotchas) with remember, and check recall before re-investigating them.
 - Never fabricate file contents, command output, or test results.
 - If a tool call fails, diagnose the cause instead of repeating it blindly.
 - Never commit, push, reset, or delete data unless the user explicitly asks.
@@ -55,6 +57,9 @@ func BuildSystemPrompt(cfg *config.Config, depth int, catalog *skills.Catalog) s
 - The user can see tool calls and their output, so do not paste large outputs back into your reply.
 - End with a short summary: what changed, where, and how it was verified.
 `)
+	if depth == 0 {
+		b.WriteString("- For multi-step work, write a short plan with todo_write and keep it current as items finish.\n")
+	}
 	if section := catalog.Section(); section != "" {
 		b.WriteString(section)
 	}
@@ -141,4 +146,26 @@ func loadProjectInstructions(cfg *config.Config) string {
 		fmt.Fprintf(&b, "### %s\n%s\n\n", it.path, it.body)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// PlanSection renders the session's todo list for the system prompt.
+func PlanSection(todos []session.Todo) string {
+	if len(todos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n# Current plan\n")
+	b.WriteString("Your working plan for this session. Keep it current with todo_write; " +
+		"at most one item should be in_progress.\n")
+	for _, todo := range todos {
+		marker := "[ ]"
+		switch todo.Status {
+		case "completed":
+			marker = "[x]"
+		case "in_progress":
+			marker = "[~]"
+		}
+		fmt.Fprintf(&b, "- %s %s\n", marker, todo.Text)
+	}
+	return b.String()
 }

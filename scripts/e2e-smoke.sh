@@ -22,17 +22,29 @@ FLAKYPORT=${FLAKYPORT:-18083}
 FLAKYWEBPORT=${FLAKYWEBPORT:-18084}
 SLOWPORT=${SLOWPORT:-18085}
 SLOWWEBPORT=${SLOWWEBPORT:-18086}
+TODOPORT=${TODOPORT:-18087}
+MEMPORT=${MEMPORT:-18088}
 MOCK_PID=""
 WEB_PID=""
 MOCK2_PID=""
 WEB2_PID=""
 MOCK3_PID=""
 WEB3_PID=""
+MOCK4_PID=""
+MOCK5_PID=""
 AUTH_PID=""
 cleanup() {
   if [ -n "$AUTH_PID" ]; then
     kill "$AUTH_PID" 2>/dev/null || true
     wait "$AUTH_PID" 2>/dev/null || true
+  fi
+  if [ -n "$MOCK5_PID" ]; then
+    kill "$MOCK5_PID" 2>/dev/null || true
+    wait "$MOCK5_PID" 2>/dev/null || true
+  fi
+  if [ -n "$MOCK4_PID" ]; then
+    kill "$MOCK4_PID" 2>/dev/null || true
+    wait "$MOCK4_PID" 2>/dev/null || true
   fi
   if [ -n "$WEB3_PID" ]; then
     kill "$WEB3_PID" 2>/dev/null || true
@@ -171,6 +183,88 @@ SESS_FILE=$(ls "$TMP"/sessions/*.json | head -n 1)
 SID=$(basename "$SESS_FILE" .json)
 grep -q '"checkpoints"' "$SESS_FILE"
 grep -q 'mock-output.txt' "$SESS_FILE"
+
+# Deeper agent capabilities: the plan tool, durable memory, and the automatic
+# verification gate.
+mkdir -p "$TMP/deeper-work" "$TMP/deeper-sessions" "$TMP/memory-work" "$TMP/memory-sessions" \
+  "$TMP/todo-work" "$TMP/todo-sessions" "$TMP/fail-work" "$TMP/fail-sessions" "$TMP/doctor-work"
+cat > "$TMP/verify.json" <<EOF
+{ "verify": { "command": "test -f mock-output.txt && echo verified-ok", "timeout_sec": 30 } }
+EOF
+DEEPSEEK_API_KEY=test \
+CODEAGENT_BASE_URL="http://127.0.0.1:$PORT" \
+CODEAGENT_SESSIONS_DIR="$TMP/deeper-sessions" \
+CODEAGENT_APPROVAL=auto \
+"$TMP/codedeep$EXT" -config "$TMP/verify.json" -cwd "$TMP/deeper-work" -p "write a demo file" -plain >"$TMP/verify-out.txt"
+grep -q "verify ok" "$TMP/verify-out.txt"
+grep -q "verified-ok" "$TMP/verify-out.txt"
+
+# A persistent failure is retried twice and then fails the turn instead of
+# reporting success.
+cat > "$TMP/verify-fail.json" <<EOF
+{ "verify": { "command": "echo gate-broken && exit 1" } }
+EOF
+if DEEPSEEK_API_KEY=test \
+  CODEAGENT_BASE_URL="http://127.0.0.1:$PORT" \
+  CODEAGENT_SESSIONS_DIR="$TMP/fail-sessions" \
+  CODEAGENT_APPROVAL=auto \
+  "$TMP/codedeep$EXT" -config "$TMP/verify-fail.json" -cwd "$TMP/fail-work" -p "write a demo file" -plain >"$TMP/verify-fail-out.txt" 2>&1; then
+  echo "a failing verification should fail the turn" >&2
+  cat "$TMP/verify-fail-out.txt" >&2
+  exit 1
+fi
+grep -q "verify failed" "$TMP/verify-fail-out.txt"
+grep -q "automatic verification failed 2 times" "$TMP/verify-fail-out.txt"
+
+# The plan is persisted with the session and rendered by the plan event.
+"$TMP/mockllm$EXT" -addr "127.0.0.1:$TODOPORT" -scenario todo -delay 1ms >"$TMP/mock-todo.log" 2>&1 &
+MOCK4_PID=$!
+wait_http "http://127.0.0.1:$TODOPORT/health" "$TMP/mock-todo.log"
+DEEPSEEK_API_KEY=test \
+CODEAGENT_BASE_URL="http://127.0.0.1:$TODOPORT" \
+CODEAGENT_SESSIONS_DIR="$TMP/todo-sessions" \
+CODEAGENT_APPROVAL=auto \
+"$TMP/codedeep$EXT" -cwd "$TMP/todo-work" -p "plan the task" -plain >"$TMP/todo-out.txt"
+grep -q "plan 1/3 complete" "$TMP/todo-out.txt"
+grep -q "inspect the workspace" "$TMP/todo-out.txt"
+TODO_FILE=$(ls "$TMP"/todo-sessions/*.json | head -n 1)
+grep -q '"todos": \[' "$TODO_FILE"
+grep -q '"text": "inspect the workspace"' "$TODO_FILE"
+grep -q '"status": "completed"' "$TODO_FILE"
+grep -q '"status": "in_progress"' "$TODO_FILE"
+printf '/todos\n/quit\n' | env DEEPSEEK_API_KEY=test \
+  CODEAGENT_BASE_URL="http://127.0.0.1:$TODOPORT" \
+  CODEAGENT_SESSIONS_DIR="$TMP/todo-sessions" \
+  "$TMP/codedeep$EXT" -cwd "$TMP/todo-work" -resume last -plain >"$TMP/todo-repl.txt"
+grep -q "Plan" "$TMP/todo-repl.txt"
+grep -q "\[~\] write the mock build command" "$TMP/todo-repl.txt"
+
+# Durable memory survives the session: a note is written under the workspace,
+# read back through recall, and listed by the REPL and doctor.
+"$TMP/mockllm$EXT" -addr "127.0.0.1:$MEMPORT" -scenario memory -delay 1ms >"$TMP/mock-memory.log" 2>&1 &
+MOCK5_PID=$!
+wait_http "http://127.0.0.1:$MEMPORT/health" "$TMP/mock-memory.log"
+DEEPSEEK_API_KEY=test \
+CODEAGENT_BASE_URL="http://127.0.0.1:$MEMPORT" \
+CODEAGENT_SESSIONS_DIR="$TMP/memory-sessions" \
+CODEAGENT_APPROVAL=auto \
+"$TMP/codedeep$EXT" -cwd "$TMP/memory-work" -p "remember the build command" -plain >"$TMP/memory-out.txt"
+grep -q "Run go build ./..." "$TMP/memory-out.txt"
+test -f "$TMP/memory-work/.codedeep/memory/mock-build-command.md"
+grep -q "description: how the mock project builds" "$TMP/memory-work/.codedeep/memory/mock-build-command.md"
+printf '/memory mock\n/quit\n' | env DEEPSEEK_API_KEY=test \
+  CODEAGENT_BASE_URL="http://127.0.0.1:$MEMPORT" \
+  CODEAGENT_SESSIONS_DIR="$TMP/memory-sessions" \
+  "$TMP/codedeep$EXT" -cwd "$TMP/memory-work" -plain >"$TMP/memory-repl.txt"
+grep -q "mock-build-command" "$TMP/memory-repl.txt"
+grep -q "Memory matching" "$TMP/memory-repl.txt"
+
+# Doctor reports the verification command and the memory note count.
+(cd "$TMP/doctor-work" && "$TMP/codedeep$EXT" doctor -config "$TMP/verify.json") >"$TMP/doctor-deeper.txt"
+grep -q "verify         test -f mock-output.txt && echo verified-ok" "$TMP/doctor-deeper.txt"
+(cd "$TMP/memory-work" && "$TMP/codedeep$EXT" doctor -config "$TMP/noauth.json") >"$TMP/doctor-memory.txt"
+grep -q "verify         off" "$TMP/doctor-memory.txt"
+grep -q "memory         1 notes" "$TMP/doctor-memory.txt"
 
 # Plan mode must refuse the write and leave the workspace untouched.
 mkdir -p "$TMP/plan-work" "$TMP/plan-sessions"

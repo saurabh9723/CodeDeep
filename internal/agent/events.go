@@ -5,6 +5,7 @@ import (
 
 	"codedeep/internal/diagnostics"
 	"codedeep/internal/llm"
+	"codedeep/internal/session"
 )
 
 const (
@@ -23,6 +24,9 @@ const (
 	EventSubagentEnd    = "subagent_end"
 	EventHook           = "hook"
 	EventDiagnostics    = "diagnostics"
+	EventTodos          = "todos"
+	EventVerifyStart    = "verify_start"
+	EventVerify         = "verify"
 	EventRetry          = "retry"
 	EventSaved          = "saved"
 	EventDone           = "done"
@@ -54,6 +58,7 @@ type Event struct {
 	Retry       *llm.RetryNotice         `json:"retry,omitempty"`
 	Message     string                   `json:"message,omitempty"`
 	Annotations []diagnostics.Diagnostic `json:"annotations,omitempty"`
+	Todos       []session.Todo           `json:"todos,omitempty"`
 	// Seq is assigned by the web transport so reconnecting clients can resume
 	// exactly where they left off. Other emitters leave it zero.
 	Seq int64 `json:"seq,omitempty"`

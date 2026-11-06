@@ -12,6 +12,7 @@ import (
 	"codedeep/internal/jobs"
 	"codedeep/internal/llm"
 	"codedeep/internal/mcp"
+	"codedeep/internal/memory"
 	"codedeep/internal/session"
 	"codedeep/internal/skills"
 	"codedeep/internal/tools"
@@ -25,6 +26,7 @@ type App struct {
 	FS       *tools.FS
 	Sessions *session.Store
 	Skills   *skills.Catalog
+	Memory   *memory.Store
 	Jobs     *jobs.Manager
 	Logf     func(format string, args ...any)
 
@@ -48,6 +50,8 @@ func New(cfg *config.Config) (*App, error) {
 	jobs.RegisterTools(registry, manager)
 	catalog := skills.Discover(cfg.WorkDir, cfg.Home)
 	catalog.RegisterTools(registry)
+	mem := memory.New(cfg.WorkDir, cfg.Home)
+	memory.RegisterTools(registry, mem)
 	client := llm.NewProvider(cfg.Provider, cfg.BaseURL, cfg.APIKey)
 
 	a := &App{
@@ -57,6 +61,7 @@ func New(cfg *config.Config) (*App, error) {
 		FS:       fsys,
 		Sessions: store,
 		Skills:   catalog,
+		Memory:   mem,
 		Jobs:     manager,
 		Logf:     logf,
 	}
@@ -92,6 +97,7 @@ func (a *App) NewAgent(approver approval.Approver, emit agent.Emitter) *agent.Ag
 		Approver: approver,
 		Emitter:  emit,
 		Skills:   a.Skills,
+		Memory:   a.Memory,
 	})
 }
 

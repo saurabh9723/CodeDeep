@@ -29,6 +29,15 @@ type Session struct {
 	ToolUsage   map[string]llm.ToolUsage `json:"tool_usage,omitempty"`
 	Turns       int                      `json:"turns"`
 	Checkpoints []Checkpoint             `json:"checkpoints,omitempty"`
+	// Todos is the agent's working plan for this session. It survives turns
+	// and compaction so long tasks keep their structure.
+	Todos []Todo `json:"todos,omitempty"`
+}
+
+// Todo is one item in the session's working plan.
+type Todo struct {
+	Text   string `json:"text"`
+	Status string `json:"status"`
 }
 
 // Checkpoint is the pre-turn state of every file a turn mutated. Undo restores

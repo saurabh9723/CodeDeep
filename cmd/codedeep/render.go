@@ -15,6 +15,7 @@ import (
 	"codedeep/internal/agent"
 	"codedeep/internal/diagnostics"
 	"codedeep/internal/llm"
+	"codedeep/internal/session"
 	"codedeep/internal/util"
 )
 
@@ -290,6 +291,29 @@ func (r *renderer) Emit(ev agent.Event) {
 			r.ensureNL()
 		}
 
+	case agent.EventTodos:
+		r.ensureNL()
+		r.inReasoning = false
+		fmt.Fprintf(r.out, "%s %s\n", r.p.cyan("plan"), r.p.dim(todoSummary(ev.Todos)))
+
+	case agent.EventVerifyStart:
+		r.ensureNL()
+		r.inReasoning = false
+		fmt.Fprintf(r.out, "%s %s\n", r.p.cyan("verify"), r.p.dim(ev.Message))
+
+	case agent.EventVerify:
+		r.ensureNL()
+		r.inReasoning = false
+		status := r.p.green("ok")
+		if ev.IsError {
+			status = r.p.red("failed")
+		}
+		fmt.Fprintf(r.out, "%s %s %s\n", r.p.cyan("verify"), status, r.p.dim(ev.Message))
+		if ev.IsError && strings.TrimSpace(ev.Output) != "" {
+			r.stream(util.TruncateMiddle(ev.Output, 2000), r.depthPrefix(ev.Depth)+"  ", r.p.dim)
+			r.ensureNL()
+		}
+
 	case agent.EventApprovalResult:
 		if ev.IsError {
 			r.ensureNL()
@@ -449,6 +473,19 @@ func retryMessage(n *llm.RetryNotice) string {
 	}
 	delay := util.HumanDuration(time.Duration(n.DelayMS) * time.Millisecond)
 	return fmt.Sprintf("%s — retrying in %s (attempt %d/%d)", reason, delay, n.Attempt, n.Max)
+}
+
+func todoSummary(todos []session.Todo) string {
+	done := 0
+	for _, todo := range todos {
+		if todo.Status == "completed" {
+			done++
+		}
+	}
+	if len(todos) == 0 {
+		return "cleared"
+	}
+	return fmt.Sprintf("%d/%d complete", done, len(todos))
 }
 
 func outputSummary(ev agent.Event) string {

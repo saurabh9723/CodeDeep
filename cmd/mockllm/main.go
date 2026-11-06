@@ -49,7 +49,7 @@ type server struct {
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:18080", "listen address")
-	scenario := flag.String("scenario", "basic", "basic, multi, subagent, read, write, text, flaky")
+	scenario := flag.String("scenario", "basic", "basic, multi, subagent, read, write, text, todo, memory, flaky")
 	delay := flag.Duration("delay", 25*time.Millisecond, "delay between streamed chunks")
 	flag.Parse()
 
@@ -245,6 +245,18 @@ func (s *server) plan(req chatRequest, system string, last requestMessage) plan 
 			text: "Subagent report: the module is codedeep and it builds cleanly.",
 		}
 	}
+	if s.scenario == "memory" && last.Role == "tool" && strings.HasPrefix(strings.TrimSpace(last.text()), "Saved memory") {
+		return plan{
+			kind:      "memory-recall",
+			reasoning: "The note was saved, so I will read it back to confirm it is durable.",
+			text:      "Saved the note; checking it through recall.",
+			calls: []toolCall{{
+				id:   "call_recall_1",
+				name: "recall",
+				args: `{"query":"mock build command"}`,
+			}},
+		}
+	}
 	if last.Role == "tool" {
 		output := strings.TrimSpace(last.text())
 		if len(output) > 200 {
@@ -307,6 +319,31 @@ func (s *server) plan(req chatRequest, system string, last requestMessage) plan 
 				id:   "call_agent_1",
 				name: "agent",
 				args: `{"description":"inspect module","prompt":"Inspect the repository and report the Go module name."}`,
+			}},
+		}
+	case "todo":
+		return plan{
+			kind:      "todo",
+			reasoning: "This is a multi-step task, so I will record a short plan first.",
+			text:      "Writing the plan.",
+			calls: []toolCall{{
+				id:   "call_todo_1",
+				name: "todo_write",
+				args: `{"todos":[{"text":"inspect the workspace","status":"completed"},` +
+					`{"text":"write the mock build command","status":"in_progress"},` +
+					`{"text":"report the result"}]}`,
+			}},
+		}
+	case "memory":
+		return plan{
+			kind:      "memory",
+			reasoning: "The build command is durable project knowledge, so I will remember it.",
+			text:      "Saving a durable note.",
+			calls: []toolCall{{
+				id:   "call_remember_1",
+				name: "remember",
+				args: `{"name":"mock-build-command","description":"how the mock project builds",` +
+					`"body":"Run go build ./... to build the mock project."}`,
 			}},
 		}
 	case "xss":

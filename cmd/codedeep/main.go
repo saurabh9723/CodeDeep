@@ -21,6 +21,7 @@ import (
 	"codedeep/internal/config"
 	"codedeep/internal/jobs"
 	"codedeep/internal/llm"
+	"codedeep/internal/memory"
 	"codedeep/internal/session"
 	"codedeep/internal/skills"
 	"codedeep/internal/tools"
@@ -499,6 +500,13 @@ func cmdDoctor(args []string) int {
 	fmt.Printf("max steps      %d\n", cfg.MaxSteps)
 	fmt.Printf("reasoning      %s\n", reasoningSummary(cfg))
 	fmt.Printf("prompt cache   %s\n", cacheSummary(cfg))
+	verifyCommand := strings.TrimSpace(cfg.Verify.Command)
+	if verifyCommand == "" {
+		verifyCommand = "off"
+	}
+	fmt.Printf("verify         %s\n", verifyCommand)
+	mem := memory.New(cfg.WorkDir, cfg.Home)
+	fmt.Printf("memory         %d notes\n", len(mem.List()))
 
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	reg := tools.NewRegistry()

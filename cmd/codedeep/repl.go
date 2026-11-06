@@ -334,6 +334,12 @@ func (r *repl) command(line string) bool {
 	case "/checkpoint", "/cp":
 		r.showCheckpointDiff(arg)
 
+	case "/todos", "/plan-list":
+		r.printTodos()
+
+	case "/memory":
+		r.printMemory(arg)
+
 	case "/reasoning":
 		r.render.showReasoning = !r.render.showReasoning
 		state := "off"
@@ -398,6 +404,8 @@ func (r *repl) printHelp() {
 		{"/undo [n]", "revert the last turn, or roll back through checkpoint n"},
 		{"/checkpoints", "list checkpoints with per-turn diff stats"},
 		{"/checkpoint <n>", "show the diff captured by checkpoint n"},
+		{"/todos", "show the agent's current plan"},
+		{"/memory [query]", "list or search durable project notes"},
 		{"/reasoning", "toggle the reasoning stream"},
 		{"/status", "session and runtime status"},
 		{"/tools", "list available tools"},
@@ -663,6 +671,47 @@ func (r *repl) showCheckpointDiff(arg string) {
 	r.render.printDiff(fmt.Sprintf("checkpoint #%d (turn %d)\n%s", n, cp.Turn, cp.Diff), 0)
 }
 
+func (r *repl) printTodos() {
+	p := r.render.p
+	if len(r.sess.Todos) == 0 {
+		r.render.Notice("no plan yet — a multi-step turn can keep one with todo_write")
+		return
+	}
+	fmt.Fprintln(os.Stdout, p.bold("Plan"))
+	for _, todo := range r.sess.Todos {
+		marker := p.dim("[ ]")
+		switch todo.Status {
+		case "completed":
+			marker = p.green("[x]")
+		case "in_progress":
+			marker = p.cyan("[~]")
+		}
+		fmt.Fprintf(os.Stdout, "  %s %s\n", marker, todo.Text)
+	}
+}
+
+func (r *repl) printMemory(arg string) {
+	p := r.render.p
+	notes := r.app.Memory.Search(arg)
+	if len(notes) == 0 {
+		if strings.TrimSpace(arg) == "" {
+			r.render.Notice("no project memory yet — the agent saves notes with remember")
+		} else {
+			r.render.Notice("no memory matched %q", arg)
+		}
+		return
+	}
+	title := "Memory"
+	if strings.TrimSpace(arg) != "" {
+		title = fmt.Sprintf("Memory matching %q", arg)
+	}
+	fmt.Fprintln(os.Stdout, p.bold(title))
+	for _, note := range notes {
+		fmt.Fprintf(os.Stdout, "  %-24s %-8s %s\n", p.cyan(note.Name), p.dim(note.Scope), p.dim(note.Description))
+	}
+	r.render.Notice("the agent reads these with recall; memory lives in .codedeep/memory")
+}
+
 func (r *repl) printTools() {
 	p := r.render.p
 	fmt.Fprintln(os.Stdout, p.bold("Tools"))
@@ -670,10 +719,12 @@ func (r *repl) printTools() {
 		marker := p.dim("·")
 		if spec.ReadOnly {
 			marker = p.green("r")
+		} else if spec.Internal {
+			marker = p.cyan("i")
 		}
 		fmt.Fprintf(os.Stdout, "  %s %-22s %s\n", marker, p.cyan(spec.Name), p.dim(util.FirstLine(spec.Description, 88)))
 	}
-	fmt.Fprintln(os.Stdout, p.dim("  r = read-only (never needs approval)"))
+	fmt.Fprintln(os.Stdout, p.dim("  r = read-only (never needs approval) · i = internal state (plan or memory)"))
 }
 
 func (r *repl) printSkills() {

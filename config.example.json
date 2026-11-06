@@ -32,6 +32,10 @@
     { "pattern": "*.go", "command": "go vet ./..." }
   ],
   "diagnostic_timeout_sec": 30,
+  "verify": {
+    "command": "",
+    "timeout_sec": 300
+  },
   "editor": {
     "command": "code",
     "args": ["-g", "{file}:{line}"]

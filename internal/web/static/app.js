@@ -26,6 +26,7 @@ const state = {
   cost: 0,
   plan: false,
   checkpoints: 0,
+  todos: [],
   files: { open: false, mention: false, path: '', seq: 0 },
   palette: { open: false, items: [], index: 0 },
   images: [],
@@ -95,6 +96,7 @@ function bindUI() {
   $('#planChip').addEventListener('click', togglePlan);
   $('#undoBtn').addEventListener('click', openCheckpoints);
   $('#checkpointsCloseBtn').addEventListener('click', closeCheckpoints);
+  $('#todoHead').addEventListener('click', toggleTodos);
   $('#exportBtn').addEventListener('click', (e) => {
     e.stopPropagation();
     toggleExportMenu();
@@ -310,6 +312,7 @@ async function loadSession(id, opts = {}) {
     if (sess.model) $('#modelChip').textContent = sess.model;
     setUsage(sess.usage || null, 0, sess.tool_usage || null);
     setCheckpoints((sess.checkpoints || []).length);
+    setTodos(sess.todos || []);
     await refreshSessions();
     closeSidebar();
     if (sess.running) reattachRun(sess.id);
@@ -353,6 +356,7 @@ function newChat() {
   setTitle('New session');
   setUsage(null);
   setCheckpoints(0);
+  setTodos([]);
   updateExportButton();
   renderSessions(state.lastSessions);
   closeSidebar();
@@ -1099,6 +1103,19 @@ async function handleEvent(ev) {
     case 'diagnostics':
       addDiagnostics(ev);
       break;
+    case 'todos':
+      setTodos(ev.todos || []);
+      break;
+    case 'verify_start':
+      setStatus('busy', 'verifying');
+      break;
+    case 'verify':
+      if (ev.is_error) {
+        addNote(`Verification failed: ${ev.message || 'verify'}\n${truncate(ev.output || '', 1200)}`, 'warn');
+      } else {
+        addNote(`Verification passed: ${ev.message || 'verify'}`);
+      }
+      break;
     case 'error':
       if (ev.message && ev.message !== 'context canceled') addErrorCard(ev.message);
       setStatus('error', 'error');
@@ -1130,6 +1147,7 @@ async function reloadForReset(id) {
     if (sess.model) $('#modelChip').textContent = sess.model;
     setUsage(sess.usage || null, 0, sess.tool_usage || null);
     setCheckpoints((sess.checkpoints || []).length);
+    setTodos(sess.todos || []);
   } catch {
     /* keep the current transcript if the reload fails */
   }
@@ -1549,6 +1567,11 @@ function renderHistory(sess) {
   for (const m of msgs) {
     if (!m) continue;
     if (m.role === 'user') {
+      if ((m.content || '').startsWith('[automatic verification failed]')) {
+        if (!turn) turn = newTurn();
+        addNote('Automatic verification failed — the failure was sent back to the model', 'warn', turn);
+        continue;
+      }
       turn = newTurn();
       if ((m.content || '').startsWith('[Conversation summary')) {
         addSummaryCard(m.content || '', turn);
@@ -1928,6 +1951,57 @@ function setCheckpoints(count) {
         (state.checkpoints > 1 ? ` (${state.checkpoints} checkpoints)` : '');
 }
 
+function setTodos(todos) {
+  state.todos = Array.isArray(todos) ? todos : [];
+  renderTodos();
+}
+
+function renderTodos() {
+  const panel = $('#todoPanel');
+  const list = $('#todoList');
+  const progress = $('#todoProgress');
+  if (!panel || !list || !progress) return;
+  const todos = state.todos;
+  if (!todos.length) {
+    panel.hidden = true;
+    list.textContent = '';
+    progress.textContent = '';
+    return;
+  }
+  panel.hidden = false;
+
+  let done = 0;
+  let active = false;
+  list.textContent = '';
+  for (const todo of todos) {
+    const status = todo.status || 'pending';
+    if (status === 'completed') done++;
+    const row = el('li', 'todo-row ' + status);
+    const text = todo.text || '';
+    if (status === 'completed') {
+      row.append(el('span', 'todo-icon', '✓'), el('span', 'todo-text', text));
+    } else if (status === 'in_progress') {
+      row.append(el('span', 'todo-icon', '◐'), el('span', 'todo-text', text));
+      active = true;
+    } else {
+      row.append(el('span', 'todo-icon', '○'), el('span', 'todo-text', text));
+    }
+    list.append(row);
+  }
+  progress.textContent = `${done}/${todos.length}`;
+  panel.classList.toggle('active', active);
+}
+
+function toggleTodos() {
+  const panel = $('#todoPanel');
+  const head = $('#todoHead');
+  if (!panel || !head) return;
+  const collapsed = panel.classList.toggle('collapsed');
+  head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  const caret = $('#todoCaret');
+  if (caret) caret.textContent = collapsed ? '▸' : '▾';
+}
+
 function updatePlanChip(approval) {
   if (approval) state.plan = approval === 'plan';
   const chip = $('#planChip');
@@ -1944,6 +2018,7 @@ async function refreshSessionState() {
   try {
     const sess = await api('/api/sessions/' + encodeURIComponent(state.sessionId));
     setCheckpoints((sess.checkpoints || []).length);
+    setTodos(sess.todos || []);
     setUsage(sess.usage || null);
   } catch {
     /* non-fatal */

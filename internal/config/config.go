@@ -68,6 +68,14 @@ type Editor struct {
 	Args    []string `json:"args,omitempty"`
 }
 
+// Verify is an end-of-turn verification gate. When a turn changes files and
+// the model has not verified the change, Command runs in the workspace; a
+// failure is fed back to the model so it can fix the problem.
+type Verify struct {
+	Command    string `json:"command"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+}
+
 type Config struct {
 	Provider          string               `json:"provider"`
 	APIKey            string               `json:"api_key"`
@@ -95,6 +103,7 @@ type Config struct {
 	Hooks             Hooks                `json:"hooks,omitempty"`
 	Diagnostics       []DiagnosticRule     `json:"diagnostics,omitempty"`
 	DiagnosticTimeout int                  `json:"diagnostic_timeout_sec,omitempty"`
+	Verify            Verify               `json:"verify,omitempty"`
 	WebToken          string               `json:"web_token,omitempty"`
 	WebInsecure       bool                 `json:"web_insecure,omitempty"`
 	Editor            *Editor              `json:"editor,omitempty"`

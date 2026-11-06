@@ -22,6 +22,17 @@ the browser.
   diff and roll back through any checkpoint.
 - **Plan mode** — a read-only mode that blocks mutations and asks the model to
   produce a concrete plan. Switch to another mode to execute it.
+- **Session plan** — the root agent can keep a persistent checklist with
+  `todo_write` (`pending`, `in_progress`, `completed`). The plan is saved with
+  the session, injected into the system prompt on every step and after
+  compaction, shown in the web plan panel, and listed by `/todos`.
+- **Project memory** — `remember`, `recall`, and `forget` store durable notes in
+  `<workspace>/.codedeep/memory` (project) and `~/.codedeep/memory` (global).
+  The system prompt carries a bounded index of note names and descriptions, and
+  `/memory` searches it.
+- **Automatic verification** — optionally run a build, test, or lint command
+  when a turn finishes with unverified changes. Failures are fed back to the
+  model for up to two correction attempts before the turn fails.
 - **Git awareness** — read-only `git_status` and `git_diff` tools, plus the
   current branch and uncommitted-change count in the system prompt.
 - **Approvals and permission rules** — `ask` (default), `auto`, `readonly`, or
@@ -51,10 +62,10 @@ the browser.
   Anthropic Messages and Gemini generateContent adapters and an Ollama preset;
   switch with `-provider` or the config file.
 - **Web UI** — Qoder-style interface served from the same binary, no Node or
-  Electron required. Includes diff cards, plan mode, a checkpoint review panel
-  with per-turn diffs and rollback, undo, a searchable session sidebar, a file
-  picker with `@`-mentions, a slash-command palette, and image paste/drag-drop
-  for vision models.
+  Electron required. Includes diff cards, plan mode, a collapsible live plan
+  panel, verification results, a checkpoint review panel with per-turn diffs and
+  rollback, undo, a searchable session sidebar, a file picker with `@`-mentions,
+  a slash-command palette, and image paste/drag-drop for vision models.
 - **Resilient providers** — transient failures (408/409/429/5xx and connection
   errors) are retried with exponential backoff and jitter. `Retry-After` is
   honored, and the CLI and web stream show a retry notice with the delay.
@@ -126,9 +137,10 @@ echo "summarize the last commit" | ./bin/codedeep -p -
 
 REPL commands: `/help`, `/new`, `/sessions [query]`, `/resume <id|#|title>`,
 `/export [md|json] [path]`, `/title`, `/model`, `/models`, `/approval`,
-`/plan [on|off]`, `/checkpoints`, `/checkpoint <n>`, `/undo [n]`, `/reasoning`,
-`/status`, `/tools`, `/compact`, `/skills`, `/skill <name> [task]`, `/jobs`,
-`/job <id>`, `/kill <id>`, `/open [path[:line]]`, `/clear`, `/quit`.
+`/plan [on|off]`, `/checkpoints`, `/checkpoint <n>`, `/undo [n]`, `/todos`,
+`/memory [query]`, `/reasoning`, `/status`, `/tools`, `/compact`, `/skills`,
+`/skill <name> [task]`, `/jobs`, `/job <id>`, `/kill <id>`,
+`/open [path[:line]]`, `/clear`, `/quit`.
 
 Sessions can also be searched and exported without entering the REPL:
 
@@ -241,6 +253,7 @@ config file is fine. See [`config.example.json`](config.example.json).
     { "pattern": "*.go", "command": "go vet ./..." }
   ],
   "diagnostic_timeout_sec": 30,
+  "verify": { "command": "go test ./...", "timeout_sec": 300 },
   "editor": { "command": "code", "args": ["-g", "{file}:{line}"] },
   "permissions": [
     { "tool": "bash", "action": "allow", "command": "go test*" },
@@ -445,6 +458,39 @@ the model, not treated as a failed edit.
 }
 ```
 
+### Session plan, memory, and verification
+
+Three capabilities keep long tasks coherent across turns and sessions:
+
+- **Plan** — `todo_write` replaces the session's checklist (up to 50 items).
+  Exactly one item should be `in_progress`. The plan survives turns and
+  compaction, is re-injected into the system prompt on every step, and appears
+  in the web plan panel and `/todos`. Subagents see the plan but cannot edit it.
+- **Memory** — `remember` saves a note with a description and markdown body;
+  saving the same name replaces it. `recall` lists the index or reads matching
+  notes in full, and `forget` removes one. Project notes shadow global notes
+  with the same name. The prompt index is capped so memory cannot crowd out the
+  conversation. Memory lives in plain files, so it can be reviewed and
+  committed if you want to share it with your team.
+- **Verification** — set `verify.command` to run once a turn changed files and
+  the model stops calling tools. A failure is appended to the conversation as
+  `[automatic verification failed]` with the command output, and the model gets
+  up to two attempts to fix it; after that the turn fails instead of reporting
+  success. Commands run in the workspace with the configured shell and are
+  capped by `timeout_sec` (default 300, maximum 900). `doctor` shows the
+  configured command, and the CLI/web stream report `verify_start` and `verify`
+  events.
+
+```json
+{
+  "verify": { "command": "go test ./...", "timeout_sec": 300 }
+}
+```
+
+Plans and memory are updated by internal tools that do not require approval and
+remain available in plan and read-only modes. They are still subject to explicit
+deny rules.
+
 ### Background jobs
 
 Pass `background: true` to `bash` to start a long-running command without
@@ -499,13 +545,18 @@ Built-in tools:
 - `git_diff` — unified diff of uncommitted changes; supports `staged`, `stat`,
   `path`, and `context`.
 - `agent` — delegate a self-contained task to a subagent.
+- `todo_write` — replace the session's persistent working plan.
+- `remember`, `recall`, `forget` — save, read, and delete durable project or
+  global memory notes.
 - `use_skill` — load a workspace or global skill from `.codedeep/skills`.
 
 `glob` and `grep` skip `.git`, `node_modules`, `vendor`, `dist`, `build`,
 virtualenvs, caches, and other generated directories. The read-only tools
 (`read_file`, `glob`, `grep`, `git_status`, `git_diff`, `job_output`,
-`job_list`, `use_skill`) never prompt. Everything else follows the approval
-mode:
+`job_list`, `recall`, `use_skill`) never prompt. `todo_write`, `remember`, and
+`forget` are internal state tools: they skip approval and stay available in
+read-only and plan modes, but explicit deny rules still apply. Everything else
+follows the approval mode:
 
 - `ask` — prompt before each mutating tool call; choose allow once, always
   allow, or deny. When the call has a preview, the prompt includes the diff.
@@ -607,13 +658,18 @@ parsing, blocking, and timeouts), per-tool usage attribution, skill discovery
 and `use_skill`, background jobs and
 their tools, editor resolution, provider retry/`Retry-After` handling,
 server-owned run buffering and replay (disconnect/reattach, slow-viewer drops,
-reset on buffer overflow), concurrent-run rejection and stop, and web
-authentication (bearer, cookie, login, and query-token flows).
+reset on buffer overflow), concurrent-run rejection and stop, web
+authentication (bearer, cookie, login, and query-token flows), the session plan
+tool and prompt injection, durable memory scoping/search/limits and its tools,
+and the verification gate (passing, failure feedback, the two-attempt cap, and
+skipping turns that changed nothing).
 
 End-to-end smoke test (builds the binaries, starts the deterministic mock model,
 runs tool turns, and checks files and sessions on disk). It also proves provider
 retries against a rate-limited mock, that a run survives a dropped connection
-and can be reattached and stopped, and the auth/plan/undo/checkpoint flows:
+and can be reattached and stopped, the auth/plan/undo/checkpoint flows, the
+verification gate (including the retry cap), plan persistence and `/todos`,
+durable memory across runs, `/memory`, and the new `doctor` lines:
 
 ```bash
 bash scripts/e2e-smoke.sh
@@ -622,8 +678,8 @@ bash scripts/e2e-smoke.sh
 Two dev servers are included:
 
 - `cmd/mockllm` — OpenAI-compatible SSE server with scenarios `basic`, `multi`,
-  `subagent`, `read`, `write`, `text`, `flaky` (rate limits the first two
-  attempts), `xss`, `mcp`, `mcp-ro`.
+  `subagent`, `read`, `write`, `text`, `todo`, `memory`, `flaky` (rate limits
+  the first two attempts), `xss`, `mcp`, `mcp-ro`.
 - `cmd/mockmcp` — minimal stdio MCP server with `echo` and the read-only
   `workspace_info`.
 
@@ -662,6 +718,8 @@ internal/tools    registry plus file, search, shell, and git tools
 internal/mcp      stdio JSON-RPC client and tool registration
 internal/hooks    pre/post tool shell hooks
 internal/diagnostics post-edit build, vet, and lint commands
+internal/memory   durable project/global notes and the remember/recall/forget tools
+internal/verify   end-of-turn verification command runner
 internal/skills   markdown skill discovery and the use_skill tool
 internal/jobs     background process manager and job tools
 internal/editor   external editor resolution and launch
@@ -673,8 +731,8 @@ internal/approval approval interface and decisions
 
 The agent emits typed events (`text`, `reasoning`, `tool_start`, `tool_end`,
 `diff`, `approval_request`, `usage`, `compact`, `subagent_start`, `hook`,
-`diagnostics`, `done`, …). The CLI renderer and the web UI both consume the same
-events, so behavior stays consistent.
+`diagnostics`, `todos`, `verify_start`, `verify`, `done`, …). The CLI renderer
+and the web UI both consume the same events, so behavior stays consistent.
 
 ## Security notes
 
@@ -701,5 +759,9 @@ checkpoints is now implemented.
 
 - Multi-checkpoint diff review (`/checkpoints`, `/checkpoint <n>`, `/undo <n>`,
   and the web checkpoint panel).
+- Session plans with `todo_write`, `/todos`, and the web plan panel.
+- Durable project/global memory with `remember`, `recall`, `forget`, and
+  `/memory`.
+- The automatic verification gate with bounded retries and the `verify` config.
 - Parallel subagents (and parallel read-only tool batches).
 - Provider-native prompt caching controls.

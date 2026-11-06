@@ -44,8 +44,13 @@ type Spec struct {
 	Description string
 	Params      json.RawMessage
 	ReadOnly    bool
-	Preview     func(ctx context.Context, args json.RawMessage) (*Preview, error)
-	Run         func(ctx context.Context, args json.RawMessage) (Result, error)
+	// Internal marks tools that update CodeDeep's own state (the session plan
+	// or durable memory notes) instead of the user's code. They skip approval,
+	// remain available in read-only and plan modes, and never join a parallel
+	// read-only batch.
+	Internal bool
+	Preview  func(ctx context.Context, args json.RawMessage) (*Preview, error)
+	Run      func(ctx context.Context, args json.RawMessage) (Result, error)
 }
 
 type Registry struct {

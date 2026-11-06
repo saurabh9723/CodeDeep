@@ -18,10 +18,12 @@ import (
 	"codedeep/internal/diff"
 	"codedeep/internal/hooks"
 	"codedeep/internal/llm"
+	"codedeep/internal/memory"
 	"codedeep/internal/session"
 	"codedeep/internal/skills"
 	"codedeep/internal/tools"
 	"codedeep/internal/util"
+	"codedeep/internal/verify"
 )
 
 const (
@@ -52,6 +54,10 @@ type Options struct {
 	Checkpoint *session.Checkpoint
 	Approval   string
 	Skills     *skills.Catalog
+	// Memory is the shared project note store. It is optional; without it the
+	// recall/remember tools are still registered by the app but the prompt
+	// gets no memory index.
+	Memory *memory.Store
 	// Locks, when set, shares one lock set across the whole agent tree so
 	// parallel subagents cannot interleave events, approvals, checkpoint
 	// writes, or session saves. Subagents inherit their parent's locks.
@@ -66,6 +72,12 @@ type sharedLocks struct {
 	checkpoint sync.Mutex
 	save       sync.Mutex
 	stats      sync.Mutex
+	todos      sync.Mutex
+	verify     sync.Mutex
+
+	turnChanged    bool
+	turnVerified   bool
+	verifyAttempts int
 }
 
 type Agent struct {
@@ -79,6 +91,8 @@ type Agent struct {
 	hooks     *hooks.Runner
 	diag      *diagnostics.Runner
 	skills    *skills.Catalog
+	mem       *memory.Store
+	verifier  *verify.Runner
 	locks     *sharedLocks
 	depth     int
 	approval  string
@@ -100,10 +114,16 @@ func New(opts Options) *Agent {
 	if locks == nil {
 		locks = &sharedLocks{}
 	}
+	exclude := []string{"agent"}
+	if depth > 0 {
+		// The session plan belongs to the root agent; subagents inherit it in
+		// their prompt but do not edit it.
+		exclude = append(exclude, "todo_write")
+	}
 	a := &Agent{
 		cfg:        opts.Config,
 		client:     opts.Client,
-		reg:        opts.Registry.CloneWithout("agent"),
+		reg:        opts.Registry.CloneWithout(exclude...),
 		fs:         opts.FS,
 		sessions:   opts.Sessions,
 		approver:   opts.Approver,
@@ -111,6 +131,8 @@ func New(opts Options) *Agent {
 		hooks:      hooks.New(opts.Config, opts.Config.WorkDir),
 		diag:       diagnostics.New(opts.Config, opts.Config.WorkDir),
 		skills:     opts.Skills,
+		mem:        opts.Memory,
+		verifier:   verify.New(opts.Config, opts.Config.WorkDir),
 		locks:      locks,
 		depth:      depth,
 		approval:   opts.Approval,
@@ -119,6 +141,7 @@ func New(opts Options) *Agent {
 		checkpoint: opts.Checkpoint,
 	}
 	a.registerSubagentTool()
+	a.registerTodoTool()
 	return a
 }
 
@@ -128,6 +151,19 @@ func (a *Agent) emitEvent(ev Event) {
 	a.locks.emit.Lock()
 	defer a.locks.emit.Unlock()
 	a.emit.Emit(ev)
+}
+
+// systemPrompt adds the session plan and durable memory index to the base
+// prompt so long tasks and earlier notes stay visible after compaction.
+func (a *Agent) systemPrompt(sess *session.Session) string {
+	system := BuildSystemPrompt(a.cfg, a.depth, a.skills)
+	if sess != nil {
+		system += PlanSection(sess.Todos)
+	}
+	if a.mem != nil {
+		system += a.mem.PromptSection(8 << 10)
+	}
+	return system
 }
 
 // Run executes one user turn, including every tool call the model requests,
@@ -151,6 +187,7 @@ func (a *Agent) RunWithImages(ctx context.Context, sess *session.Session, prompt
 	a.turnUsage = llm.Usage{}
 	a.turnTools = map[string]llm.ToolUsage{}
 	a.approval = a.cfg.ApprovalMode()
+	a.resetVerification()
 	sess.Checkpoints = append(sess.Checkpoints, session.Checkpoint{
 		Turn: sess.Turns,
 		Time: time.Now().UTC(),
@@ -161,8 +198,7 @@ func (a *Agent) RunWithImages(ctx context.Context, sess *session.Session, prompt
 	a.emitEvent(Event{Type: EventUser, SessionID: sess.ID, Text: prompt, Images: images})
 	a.save(sess)
 
-	system := BuildSystemPrompt(a.cfg, a.depth, a.skills)
-	_, err := a.runLoop(ctx, &sess.Messages, system, sess, a.cfg.MaxSteps)
+	_, err := a.runLoop(ctx, &sess.Messages, sess, a.cfg.MaxSteps)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			ev := a.doneEvent(sess, "stopped")
@@ -178,7 +214,7 @@ func (a *Agent) RunWithImages(ctx context.Context, sess *session.Session, prompt
 	return nil
 }
 
-func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string, sess *session.Session, maxSteps int) (string, error) {
+func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, sess *session.Session, maxSteps int) (string, error) {
 	if maxSteps <= 0 {
 		maxSteps = 60
 	}
@@ -189,6 +225,9 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 		if err := ctx.Err(); err != nil {
 			return lastText, err
 		}
+		// Rebuild the prompt each step so plan and memory updates made by tools
+		// are visible immediately and survive compaction within the same turn.
+		system := a.systemPrompt(a.session)
 		a.maybeCompact(ctx, msgs, system, sess)
 
 		requestMsgs := make([]llm.Message, 0, len(*msgs)+1)
@@ -280,6 +319,13 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 		if len(assistant.ToolCalls) == 0 {
 			if assistant.Content == "" && assistant.Reasoning == "" {
 				return lastText, fmt.Errorf("the model returned an empty response")
+			}
+			continued, err := a.verifyTurn(ctx, msgs, sess)
+			if err != nil {
+				return lastText, err
+			}
+			if continued {
+				continue
 			}
 			return lastText, nil
 		}
@@ -603,7 +649,7 @@ func (a *Agent) decide(ctx context.Context, spec *tools.Spec, tc llm.ToolCall, s
 	if ruleSet && rule == approval.Deny {
 		return approval.Deny, nil
 	}
-	if spec.ReadOnly {
+	if spec.ReadOnly || spec.Internal {
 		return approval.AllowOnce, nil
 	}
 	switch a.approval {
@@ -690,6 +736,7 @@ func (a *Agent) recordChange(ch *tools.Change) {
 	if ch == nil {
 		return
 	}
+	a.markChanged()
 	a.locks.checkpoint.Lock()
 	cp := a.checkpoint
 	if cp == nil {
