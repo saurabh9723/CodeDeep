@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,11 +44,12 @@ func (m requestMessage) text() string {
 type server struct {
 	scenario string
 	delay    time.Duration
+	requests atomic.Int32
 }
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:18080", "listen address")
-	scenario := flag.String("scenario", "basic", "basic, multi, subagent, read, write, text")
+	scenario := flag.String("scenario", "basic", "basic, multi, subagent, read, write, text, flaky")
 	delay := flag.Duration("delay", 25*time.Millisecond, "delay between streamed chunks")
 	flag.Parse()
 
@@ -111,6 +113,19 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		roles = append(roles, m.Role)
 	}
 	log.Printf("request model=%s stream=%v tools=%d roles=%s", req.Model, req.Stream, len(req.Tools), strings.Join(roles, ","))
+
+	// The first two attempts are rate limited so the client retry policy and
+	// its Retry-After handling can be exercised end to end.
+	if s.scenario == "flaky" {
+		if n := s.requests.Add(1); n <= 2 {
+			log.Printf("  flaky: 429 for attempt %d", n)
+			w.Header().Set("Retry-After", "0")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"error":{"message":"mock rate limit","type":"rate_limit"}}`)
+			return
+		}
+	}
 
 	if strings.Contains(system, "You summarize conversations") {
 		s.respondSummary(w, req)
@@ -240,6 +255,11 @@ func (s *server) plan(req chatRequest, system string, last requestMessage) plan 
 	}
 
 	switch s.scenario {
+	case "flaky":
+		return plan{
+			kind: "flaky",
+			text: "Recovered after the rate limit. The client retried the request and streamed this answer.",
+		}
 	case "text":
 		return plan{
 			kind:      "text",

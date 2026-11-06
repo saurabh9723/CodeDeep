@@ -55,6 +55,13 @@ the browser.
   with per-turn diffs and rollback, undo, a searchable session sidebar, a file
   picker with `@`-mentions, a slash-command palette, and image paste/drag-drop
   for vision models.
+- **Resilient providers** — transient failures (408/409/429/5xx and connection
+  errors) are retried with exponential backoff and jitter. `Retry-After` is
+  honored, and the CLI and web stream show a retry notice with the delay.
+- **Resumable web runs** — a chat turn belongs to the server, not the tab.
+  Refreshing the page or losing the connection reattaches to the buffered
+  event stream and resumes from the last event it saw; the web UI can also stop
+  a running turn.
 - **Images** — attach up to four PNG/JPEG/WebP/GIF images to a message (5 MB
   each) in the web UI; they are sent as multimodal content and kept in session
   exports.
@@ -151,6 +158,27 @@ refuses to listen on a non-loopback address without a token unless
 ```bash
 CODEAGENT_WEB_TOKEN=long-random-string ./bin/codedeep serve -addr 0.0.0.0:7777
 ```
+
+### Streaming, retries, and reconnect
+
+Each chat turn runs on the server as an independent run with a seq-numbered
+event buffer; the last 2000 events (or 4 MB) are kept for two minutes after the
+turn finishes. When the browser connection drops, the page reattaches with
+`GET /api/sessions/{id}/stream?after=<last seq it saw>`. A freshly loaded page
+resumes from the last persisted point, so transcript history loaded from disk is
+not rendered twice; the terminal event is still replayed so usage and status
+finalize. If the buffer no longer reaches back that far, the server sends a
+`reset` marker and the page reloads the transcript before continuing.
+`POST /api/sessions/{id}/stop` cancels the run (the web stop button uses it),
+`GET /api/sessions/{id}` reports `running`, and `GET /api/bootstrap` lists
+`running_sessions` so a reload can reattach immediately.
+
+Provider calls retry transient failures before any content is streamed: 408,
+409, 429, 500, 502, 503, 504, and connection errors, up to four attempts with
+exponential backoff (0.8s, 1.6s, 3.2s, capped at 8s) and ±10% jitter.
+`Retry-After` (seconds or an HTTP date) takes precedence and is capped at 60s.
+Each retry emits a `retry` event and a CLI notice with the attempt, status, and
+delay. Client errors such as 401 and 400 are never retried.
 
 ### Diagnostics
 
@@ -577,11 +605,15 @@ the Anthropic and Gemini streaming adapters (including extended-thinking and
 reasoning request bodies), hooks and diagnostics (including inline annotation
 parsing, blocking, and timeouts), per-tool usage attribution, skill discovery
 and `use_skill`, background jobs and
-their tools, editor resolution, and web authentication (bearer, cookie, login,
-and query-token flows).
+their tools, editor resolution, provider retry/`Retry-After` handling,
+server-owned run buffering and replay (disconnect/reattach, slow-viewer drops,
+reset on buffer overflow), concurrent-run rejection and stop, and web
+authentication (bearer, cookie, login, and query-token flows).
 
 End-to-end smoke test (builds the binaries, starts the deterministic mock model,
-runs a real tool turn, and checks the written file):
+runs tool turns, and checks files and sessions on disk). It also proves provider
+retries against a rate-limited mock, that a run survives a dropped connection
+and can be reattached and stopped, and the auth/plan/undo/checkpoint flows:
 
 ```bash
 bash scripts/e2e-smoke.sh
@@ -590,7 +622,8 @@ bash scripts/e2e-smoke.sh
 Two dev servers are included:
 
 - `cmd/mockllm` — OpenAI-compatible SSE server with scenarios `basic`, `multi`,
-  `subagent`, `read`, `write`, `text`, `xss`, `mcp`, `mcp-ro`.
+  `subagent`, `read`, `write`, `text`, `flaky` (rate limits the first two
+  attempts), `xss`, `mcp`, `mcp-ro`.
 - `cmd/mockmcp` — minimal stdio MCP server with `echo` and the read-only
   `workspace_info`.
 

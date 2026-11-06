@@ -25,8 +25,9 @@ import (
 var staticFS embed.FS
 
 type Server struct {
-	App *app.App
-	hub *approvalHub
+	App  *app.App
+	hub  *approvalHub
+	runs *runRegistry
 
 	mu           sync.Mutex
 	active       map[string]bool
@@ -37,6 +38,7 @@ func New(a *app.App) *Server {
 	return &Server{
 		App:    a,
 		hub:    newApprovalHub(),
+		runs:   newRunRegistry(),
 		active: map[string]bool{},
 	}
 }
@@ -57,6 +59,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("GET /api/sessions/{id}/stream", s.handleStreamRun)
+	mux.HandleFunc("POST /api/sessions/{id}/stop", s.handleStopRun)
 	mux.HandleFunc("GET /api/sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("GET /api/sessions/{id}/checkpoints/{n}", s.handleGetCheckpoint)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExportSession)
@@ -147,6 +151,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"diagnostics":      len(s.App.Cfg.Diagnostics),
 		"editor":           s.App.Cfg.Editor != nil,
 		"sessions":         metas,
+		"running_sessions": s.runs.ids(),
 		"mcp_servers":      s.App.MCPCount(),
 		"version":          "0.1.0",
 		"compact_at":       s.App.Cfg.CompactAt,
@@ -214,7 +219,12 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, sess)
+	// A running turn is served by the server, not by the tab that started it,
+	// so the client can reattach after a refresh.
+	writeJSON(w, http.StatusOK, struct {
+		*session.Session
+		Running bool `json:"running"`
+	}{Session: sess, Running: s.runs.running(sess.ID)})
 }
 
 func (s *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +313,7 @@ func (s *Server) resolveSession(w http.ResponseWriter, ref string) (*session.Ses
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.mu.Lock()
-	busy := s.active[id]
+	busy := s.active[id] || s.runs.running(id)
 	s.mu.Unlock()
 	if busy {
 		writeError(w, http.StatusConflict, "session is running")
@@ -353,12 +363,77 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		sess = s.App.Sessions.New(s.App.Cfg.Model, s.App.Cfg.WorkDir)
 	}
 
-	if !s.acquire(sess.ID) {
+	// The run belongs to the server: a dropped connection only detaches this
+	// viewer. Reattach with GET /api/sessions/{id}/stream.
+	ctx, cancel := context.WithCancel(context.Background())
+	run, ok := s.beginRun(sess.ID, cancel)
+	if !ok {
+		cancel()
 		writeError(w, http.StatusConflict, "a run is already active for this session")
 		return
 	}
-	defer s.release(sess.ID)
+	go s.executeRun(ctx, run, sess, req.Prompt, images)
 
+	s.streamRun(w, r, run, 0)
+}
+
+func (s *Server) executeRun(ctx context.Context, run *activeRun, sess *session.Session, prompt string, images []llm.Image) {
+	defer func() {
+		if p := recover(); p != nil {
+			run.emit(agent.Event{Type: agent.EventError, SessionID: sess.ID, Message: fmt.Sprintf("run crashed: %v", p)})
+			s.App.Logf("chat %s panicked: %v", sess.ID, p)
+		}
+		run.finish()
+		time.AfterFunc(runRetention, func() { s.runs.remove(run) })
+	}()
+
+	run.emit(agent.Event{Type: "session", SessionID: sess.ID, Message: sess.Title})
+	ag := s.App.NewAgent(approval.Func(s.hub.approve), run.emit)
+	if err := ag.RunWithImages(ctx, sess, prompt, images); err != nil && !errors.Is(err, context.Canceled) {
+		s.App.Logf("chat %s: %v", sess.ID, err)
+	}
+}
+
+// handleStreamRun reattaches a page or a dropped connection to the run that
+// owns the session. The default resume point is the last persisted state, so a
+// freshly loaded page does not replay events it already rendered from disk.
+func (s *Server) handleStreamRun(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.resolveSession(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	run := s.runs.get(sess.ID)
+	if run == nil {
+		writeError(w, http.StatusNotFound, "no active run for this session")
+		return
+	}
+	after := int64(-1)
+	if v := strings.TrimSpace(r.URL.Query().Get("after")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "after must be an integer")
+			return
+		}
+		after = n
+	}
+	s.streamRun(w, r, run, after)
+}
+
+func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.resolveSession(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	run := s.runs.get(sess.ID)
+	if run == nil || run.finished() {
+		writeJSON(w, http.StatusConflict, map[string]any{"stopped": false, "error": "no run is active for this session"})
+		return
+	}
+	run.cancel()
+	writeJSON(w, http.StatusOK, map[string]any{"stopped": true})
+}
+
+func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, run *activeRun, after int64) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported")
@@ -367,40 +442,46 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-Session-Id", run.id)
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	subID, replay, ch, reset := run.attach(after)
+	defer run.detach(subID)
 
-	var writeMu sync.Mutex
-	failed := false
-	emit := func(ev agent.Event) {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		if failed {
-			return
-		}
-		if ev.SessionID == "" {
-			ev.SessionID = sess.ID
-		}
-		data, err := json.Marshal(ev)
+	write := func(v any) bool {
+		data, err := json.Marshal(v)
 		if err != nil {
-			return
+			return true
 		}
 		if _, err := w.Write(append(data, '\n')); err != nil {
-			failed = true
-			cancel()
-			return
+			return false
 		}
 		flusher.Flush()
+		return true
 	}
-
-	emit(agent.Event{Type: "session", SessionID: sess.ID, Message: sess.Title})
-
-	ag := s.App.NewAgent(approval.Func(s.hub.approve), emit)
-	if err := ag.RunWithImages(ctx, sess, req.Prompt, images); err != nil && !errors.Is(err, context.Canceled) {
-		s.App.Logf("chat %s: %v", sess.ID, err)
+	if reset {
+		if !write(map[string]any{"type": "reset", "session_id": run.id}) {
+			return
+		}
+	}
+	for _, q := range replay {
+		if !write(q.ev) {
+			return
+		}
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case q, ok := <-ch:
+			if !ok {
+				return
+			}
+			if !write(q.ev) {
+				return
+			}
+		}
 	}
 }
 
@@ -514,11 +595,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) acquire(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active[id] {
+	if s.active[id] || s.runs.running(id) {
 		return false
 	}
 	s.active[id] = true
 	return true
+}
+
+// beginRun reserves a session for a chat turn, excluding undo and compaction
+// operations that also need exclusive access.
+func (s *Server) beginRun(id string, cancel context.CancelFunc) (*activeRun, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active[id] {
+		return nil, false
+	}
+	return s.runs.begin(id, cancel)
 }
 
 func (s *Server) release(id string) {

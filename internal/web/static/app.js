@@ -12,6 +12,7 @@ const state = {
   sessionId: null,
   running: false,
   abort: null,
+  seq: 0,
   turn: null,
   assistant: null,
   assistantFresh: false,
@@ -34,6 +35,16 @@ const chat = $('#chat');
 const input = $('#input');
 const messagesEl = $('#messages');
 const emptyState = $('#emptyState');
+
+const SESSION_KEY = 'codedeep-session';
+
+function rememberSession(id) {
+  if (id) localStorage.setItem(SESSION_KEY, id);
+}
+
+function forgetSession() {
+  localStorage.removeItem(SESSION_KEY);
+}
 
 /* ------------------------------------------------------------------ *
  * boot
@@ -69,6 +80,8 @@ async function init() {
     toast('Could not reach the local server: ' + err.message, 6000);
     setStatus('error', 'offline');
   }
+  const saved = localStorage.getItem(SESSION_KEY);
+  if (saved) await loadSession(saved, { auto: true });
   resizeInput();
   input.focus();
 }
@@ -282,11 +295,13 @@ async function refreshSessions(query) {
   }
 }
 
-async function loadSession(id) {
+async function loadSession(id, opts = {}) {
   if (state.running) stopRun();
   try {
     const sess = await api('/api/sessions/' + encodeURIComponent(id));
     state.sessionId = sess.id;
+    rememberSession(sess.id);
+    state.seq = 0;
     clearChat();
     renderHistory(sess);
     clearImages();
@@ -297,8 +312,13 @@ async function loadSession(id) {
     setCheckpoints((sess.checkpoints || []).length);
     await refreshSessions();
     closeSidebar();
+    if (sess.running) reattachRun(sess.id);
     input.focus();
   } catch (err) {
+    if (opts.auto) {
+      forgetSession();
+      return;
+    }
     toast('Could not load session: ' + err.message);
   }
 }
@@ -309,6 +329,7 @@ async function deleteSession(id) {
     await api('/api/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
     if (state.sessionId === id) {
       state.sessionId = null;
+      forgetSession();
       clearChat();
       showEmpty();
       setTitle('New session');
@@ -324,6 +345,8 @@ async function deleteSession(id) {
 function newChat() {
   if (state.running) stopRun();
   state.sessionId = null;
+  state.seq = 0;
+  forgetSession();
   clearChat();
   clearImages();
   showEmpty();
@@ -480,6 +503,7 @@ async function startChat(text, images, displayText) {
   state.toolCards.clear();
   state.approvals.clear();
   state.subagents = [];
+  state.seq = 0;
 
   state.abort = new AbortController();
   setRunning(true, 'thinking');
@@ -495,6 +519,14 @@ async function startChat(text, images, displayText) {
       location.assign('/login');
       return;
     }
+    // The server names the session before the first byte, so a dropped
+    // connection can still reattach.
+    const sid = res.headers.get('X-Session-Id');
+    if (sid) {
+      state.sessionId = sid;
+      rememberSession(sid);
+      updateExportButton();
+    }
     if (!res.ok) {
       let message = 'HTTP ' + res.status;
       try {
@@ -503,7 +535,9 @@ async function startChat(text, images, displayText) {
       } catch {
         /* ignore */
       }
-      throw new Error(message);
+      const err = new Error(message);
+      err.noRetry = res.status < 500;
+      throw err;
     }
     if (!res.body) throw new Error('This browser does not support streaming responses.');
     clearImages();
@@ -511,22 +545,93 @@ async function startChat(text, images, displayText) {
   } catch (err) {
     if (err.name === 'AbortError') {
       addNote('Stopped by user', 'warn', turn);
-    } else {
+    } else if (err.noRetry || !(await reconnectRun(turn))) {
       addErrorCard(err.message, turn);
       setStatus('error', 'error');
     }
   } finally {
-    setRunning(false);
-    finalizeAssistant();
-    state.abort = null;
-    await refreshSessionState();
-    await refreshSessions();
-    input.focus();
+    finishRunUI();
   }
 }
 
 function stopRun() {
+  const id = state.sessionId;
+  if (id) {
+    setStatus('busy', 'stopping…');
+    fetch('/api/sessions/' + encodeURIComponent(id) + '/stop', { method: 'POST' }).catch(() => {});
+    return;
+  }
   if (state.abort) state.abort.abort();
+}
+
+// reconnectRun reattaches after a dropped stream. The run keeps going on the
+// server, so this is a replay from the last event the page saw.
+async function reconnectRun(turn, opts = {}) {
+  if (!state.sessionId) return false;
+  let notice = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) {
+      if (turn && state.turn !== turn) return false;
+      await sleep(400 * attempt);
+    }
+    setStatus('busy', 'reconnecting…');
+    const query = opts.resume && attempt === 0 ? '' : '?after=' + Math.max(0, state.seq);
+    try {
+      const res = await fetch(
+        '/api/sessions/' + encodeURIComponent(state.sessionId) + '/stream' + query
+      );
+      if (res.status === 401) {
+        location.assign('/login');
+        return true;
+      }
+      if (res.status === 404 || !res.body) return false;
+      if (!res.ok) continue;
+      if (!notice) {
+        notice = true;
+        addNote('Reconnected to the running turn', 'ok', turn);
+      }
+      await readStream(res.body);
+      return true;
+    } catch (err) {
+      if (err.name === 'AbortError') return true;
+    }
+  }
+  return false;
+}
+
+// reattachRun resumes a turn that was still running when the page loaded.
+async function reattachRun(id) {
+  if (state.running || state.sessionId !== id) return;
+  hideEmpty();
+  state.seq = 0;
+  state.assistant = null;
+  state.assistantFresh = true;
+  state.toolCards.clear();
+  state.approvals.clear();
+  state.subagents = [];
+  if (!state.turn) newTurn();
+  const turn = state.turn;
+  setRunning(true, 'reconnecting…');
+  const ok = await reconnectRun(turn, { resume: true });
+  finishRunUI();
+  if (!ok) {
+    setStatus('ready', 'ready');
+    await refreshSessionState();
+    await refreshSessions();
+  }
+}
+
+function finishRunUI() {
+  setRunning(false);
+  finalizeAssistant();
+  state.abort = null;
+  refreshSessionState();
+  refreshSessions();
+  input.focus();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /* ------------------------------------------------------------------ *
@@ -903,28 +1008,33 @@ async function readStream(body) {
     while ((index = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, index).trim();
       buffer = buffer.slice(index + 1);
-      if (line) handleLine(line);
+      if (line) await handleLine(line);
     }
   }
   const tail = buffer.trim();
-  if (tail) handleLine(tail);
+  if (tail) await handleLine(tail);
 }
 
-function handleLine(line) {
+async function handleLine(line) {
   let ev;
   try {
     ev = JSON.parse(line);
   } catch {
     return;
   }
-  handleEvent(ev);
+  await handleEvent(ev);
 }
 
-function handleEvent(ev) {
+async function handleEvent(ev) {
+  if (typeof ev.seq === 'number') state.seq = ev.seq;
   switch (ev.type) {
+    case 'reset':
+      await reloadForReset(ev.session_id);
+      break;
     case 'session':
       if (ev.session_id) {
         state.sessionId = ev.session_id;
+        rememberSession(ev.session_id);
         updateExportButton();
         if (ev.message) setTitle(ev.message);
       }
@@ -978,6 +1088,14 @@ function handleEvent(ev) {
         addNote(`${where} failed for ${ev.message || 'a tool'}: ${truncate(ev.output || '', 600)}`, 'warn');
       }
       break;
+    case 'retry': {
+      const r = ev.retry || {};
+      const reason = r.message || 'busy';
+      const delay = formatDelay(r.delay_ms || 0);
+      addNote(`Provider ${reason} — retrying in ${delay} (attempt ${r.attempt || 1}/${r.max || 1})`, 'warn');
+      setStatus('busy', r.status === 429 ? 'rate limited' : 'retrying');
+      break;
+    }
     case 'diagnostics':
       addDiagnostics(ev);
       break;
@@ -993,6 +1111,31 @@ function handleEvent(ev) {
     default:
       break;
   }
+}
+
+function formatDelay(ms) {
+  const n = Number(ms) || 0;
+  return n < 1000 ? n + 'ms' : (n / 1000).toFixed(1) + 's';
+}
+
+// reloadForReset rebuilds the transcript from disk after the server dropped
+// events the page never saw. Remaining events in the stream keep appending.
+async function reloadForReset(id) {
+  if (!id) return;
+  try {
+    const sess = await api('/api/sessions/' + encodeURIComponent(id));
+    clearChat();
+    renderHistory(sess);
+    setTitle(sess.title || 'Session');
+    if (sess.model) $('#modelChip').textContent = sess.model;
+    setUsage(sess.usage || null, 0, sess.tool_usage || null);
+    setCheckpoints((sess.checkpoints || []).length);
+  } catch {
+    /* keep the current transcript if the reload fails */
+  }
+  state.assistant = null;
+  state.assistantFresh = true;
+  if (!state.turn) newTurn();
 }
 
 /* ------------------------------------------------------------------ *

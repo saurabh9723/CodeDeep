@@ -206,6 +206,9 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, system string,
 			ReasoningBudget: a.cfg.ReasoningBudget,
 			PromptCache:     a.cfg.PromptCache,
 		}, func(d llm.Delta) error {
+			if d.Retry != nil {
+				a.emitEvent(Event{Type: EventRetry, SessionID: sessionID(sess), Depth: a.depth, Retry: d.Retry})
+			}
 			if d.Reasoning != "" {
 				a.emitEvent(Event{Type: EventReasoning, SessionID: sessionID(sess), Depth: a.depth, Text: d.Reasoning})
 			}
@@ -1012,7 +1015,11 @@ func (a *Agent) save(sess *session.Session) {
 	defer a.locks.save.Unlock()
 	if err := a.sessions.Save(sess); err != nil {
 		a.emitEvent(Event{Type: EventError, SessionID: sess.ID, Depth: a.depth, Message: "session save failed: " + err.Error()})
+		return
 	}
+	// The web transport uses this marker to know which events are already on
+	// disk, so a reconnecting client only replays the unsaved tail.
+	a.emitEvent(Event{Type: EventSaved, SessionID: sess.ID, Depth: a.depth})
 }
 
 func (a *Agent) totalUsage(sess *session.Session) *llm.Usage {

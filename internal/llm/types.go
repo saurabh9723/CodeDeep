@@ -96,10 +96,12 @@ type Response struct {
 	Usage        Usage
 }
 
-// Delta is a streamed fragment of an assistant turn.
+// Delta is a streamed fragment of an assistant turn. Retry is set before any
+// content when a failed attempt will be retried.
 type Delta struct {
 	Content   string
 	Reasoning string
+	Retry     *RetryNotice
 }
 
 type APIError struct {

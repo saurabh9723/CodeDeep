@@ -18,13 +18,37 @@ esac
 
 PORT=${PORT:-18080}
 WEBPORT=${WEBPORT:-18081}
+FLAKYPORT=${FLAKYPORT:-18083}
+FLAKYWEBPORT=${FLAKYWEBPORT:-18084}
+SLOWPORT=${SLOWPORT:-18085}
+SLOWWEBPORT=${SLOWWEBPORT:-18086}
 MOCK_PID=""
 WEB_PID=""
+MOCK2_PID=""
+WEB2_PID=""
+MOCK3_PID=""
+WEB3_PID=""
 AUTH_PID=""
 cleanup() {
   if [ -n "$AUTH_PID" ]; then
     kill "$AUTH_PID" 2>/dev/null || true
     wait "$AUTH_PID" 2>/dev/null || true
+  fi
+  if [ -n "$WEB3_PID" ]; then
+    kill "$WEB3_PID" 2>/dev/null || true
+    wait "$WEB3_PID" 2>/dev/null || true
+  fi
+  if [ -n "$MOCK3_PID" ]; then
+    kill "$MOCK3_PID" 2>/dev/null || true
+    wait "$MOCK3_PID" 2>/dev/null || true
+  fi
+  if [ -n "$WEB2_PID" ]; then
+    kill "$WEB2_PID" 2>/dev/null || true
+    wait "$WEB2_PID" 2>/dev/null || true
+  fi
+  if [ -n "$MOCK2_PID" ]; then
+    kill "$MOCK2_PID" 2>/dev/null || true
+    wait "$MOCK2_PID" 2>/dev/null || true
   fi
   if [ -n "$WEB_PID" ]; then
     kill "$WEB_PID" 2>/dev/null || true
@@ -37,6 +61,20 @@ cleanup() {
   rm -rf "$TMP"
 }
 trap cleanup EXIT
+
+wait_http() {
+  url=$1
+  logfile=$2
+  for _ in $(seq 1 50); do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "server did not start: $url" >&2
+  cat "$logfile" >&2 || true
+  return 1
+}
 
 mkdir -p "$TMP/work" "$TMP/sessions" "$TMP/work/.codedeep/skills"
 cat > "$TMP/work/.codedeep/skills/review.md" <<'EOF'
@@ -283,6 +321,122 @@ test ! -f "$TMP/work/mock-output.txt"
 curl -fsS "http://127.0.0.1:$WEBPORT/api/sessions/$CP_SID/checkpoints" >"$TMP/cps3.json"
 if grep -q '"number":' "$TMP/cps3.json"; then
   echo "rolled-back checkpoints should be dropped" >&2
+  exit 1
+fi
+
+# Provider retries: the flaky mock rate limits twice before answering, and the
+# web stream surfaces retry events with the Retry-After delay.
+mkdir -p "$TMP/flaky-sessions"
+"$TMP/mockllm$EXT" -addr "127.0.0.1:$FLAKYPORT" -scenario flaky -delay 1ms >"$TMP/mock-flaky.log" 2>&1 &
+MOCK2_PID=$!
+wait_http "http://127.0.0.1:$FLAKYPORT/health" "$TMP/mock-flaky.log"
+
+DEEPSEEK_API_KEY=test \
+CODEAGENT_BASE_URL="http://127.0.0.1:$FLAKYPORT" \
+CODEAGENT_SESSIONS_DIR="$TMP/flaky-sessions" \
+CODEAGENT_APPROVAL=auto \
+"$TMP/codedeep$EXT" serve -config "$TMP/noauth.json" -addr "127.0.0.1:$FLAKYWEBPORT" -no-open -cwd "$TMP/work" >"$TMP/web-flaky.log" 2>&1 &
+WEB2_PID=$!
+wait_http "http://127.0.0.1:$FLAKYWEBPORT/api/health" "$TMP/web-flaky.log"
+
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"prompt":"retry please"}' "http://127.0.0.1:$FLAKYWEBPORT/api/chat" >"$TMP/flaky-chat.ndjson"
+grep -q '"type":"retry"' "$TMP/flaky-chat.ndjson"
+grep -q '"status":429' "$TMP/flaky-chat.ndjson"
+grep -q '"attempt":1' "$TMP/flaky-chat.ndjson"
+grep -q '"type":"done"' "$TMP/flaky-chat.ndjson"
+FLAKY_SID=$(grep -o '"session_id":"[^"]*"' "$TMP/flaky-chat.ndjson" | head -n 1 | sed 's/.*:"//; s/"$//')
+if [ -z "$FLAKY_SID" ] || [ ! -f "$TMP/flaky-sessions/$FLAKY_SID.json" ]; then
+  echo "retry chat session was not persisted" >&2
+  exit 1
+fi
+grep -q 'Recovered after the rate limit' "$TMP/flaky-sessions/$FLAKY_SID.json"
+if [ "$(grep -c 'flaky: 429' "$TMP/mock-flaky.log")" != "2" ]; then
+  echo "expected exactly two rate-limited attempts:" >&2
+  cat "$TMP/mock-flaky.log" >&2
+  exit 1
+fi
+
+# Resumable streams: abandon the HTTP response mid-turn, reattach from the
+# beginning, and verify the server-owned run finishes and persists.
+mkdir -p "$TMP/slow-sessions"
+"$TMP/mockllm$EXT" -addr "127.0.0.1:$SLOWPORT" -scenario text -delay 300ms >"$TMP/mock-slow.log" 2>&1 &
+MOCK3_PID=$!
+wait_http "http://127.0.0.1:$SLOWPORT/health" "$TMP/mock-slow.log"
+
+DEEPSEEK_API_KEY=test \
+CODEAGENT_BASE_URL="http://127.0.0.1:$SLOWPORT" \
+CODEAGENT_SESSIONS_DIR="$TMP/slow-sessions" \
+CODEAGENT_APPROVAL=auto \
+"$TMP/codedeep$EXT" serve -config "$TMP/noauth.json" -addr "127.0.0.1:$SLOWWEBPORT" -no-open -cwd "$TMP/work" >"$TMP/web-slow.log" 2>&1 &
+WEB3_PID=$!
+wait_http "http://127.0.0.1:$SLOWWEBPORT/api/health" "$TMP/web-slow.log"
+
+curl -s --max-time 1 -D "$TMP/resume-headers.txt" -o "$TMP/resume-partial.ndjson" \
+  -X POST -H 'Content-Type: application/json' -d '{"prompt":"keep going"}' \
+  "http://127.0.0.1:$SLOWWEBPORT/api/chat" || true
+RESUME_SID=$(grep -i '^X-Session-Id:' "$TMP/resume-headers.txt" | tr -d '\r' | awk '{print $2}')
+if [ -z "$RESUME_SID" ]; then
+  echo "chat response is missing X-Session-Id:" >&2
+  cat "$TMP/resume-headers.txt" >&2 || true
+  exit 1
+fi
+
+resume_running=0
+for _ in $(seq 1 50); do
+  if curl -fsS "http://127.0.0.1:$SLOWWEBPORT/api/sessions/$RESUME_SID" | grep -q '"running":true'; then
+    resume_running=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$resume_running" -ne 1 ]; then
+  echo "run did not survive the dropped connection" >&2
+  exit 1
+fi
+curl -fsS "http://127.0.0.1:$SLOWWEBPORT/api/bootstrap" >"$TMP/resume-boot.json"
+grep -q "\"$RESUME_SID\"" "$TMP/resume-boot.json"
+
+curl -fsS -N "http://127.0.0.1:$SLOWWEBPORT/api/sessions/$RESUME_SID/stream?after=0" >"$TMP/resume-tail.ndjson"
+grep -q '"type":"done"' "$TMP/resume-tail.ndjson"
+grep -q '"type":"text"' "$TMP/resume-tail.ndjson"
+grep -q 'The mock server streamed this text token by token' "$TMP/slow-sessions/$RESUME_SID.json"
+curl -fsS "http://127.0.0.1:$SLOWWEBPORT/api/sessions/$RESUME_SID" >"$TMP/resume-session.json"
+grep -q '"running":false' "$TMP/resume-session.json"
+
+# Stop: the server cancels a running turn and reports it through the stream.
+curl -fsS -X POST "http://127.0.0.1:$SLOWWEBPORT/api/sessions" >"$TMP/stop-session.json"
+STOP_SID=$(grep -o '"id":"[^"]*"' "$TMP/stop-session.json" | head -n 1 | sed 's/.*:"//; s/"$//')
+if [ -z "$STOP_SID" ]; then
+  echo "could not create a session for the stop test" >&2
+  exit 1
+fi
+curl -s -N -X POST -H 'Content-Type: application/json' \
+  -d "{\"session_id\":\"$STOP_SID\",\"prompt\":\"stop me\"}" \
+  "http://127.0.0.1:$SLOWWEBPORT/api/chat" >"$TMP/stop-chat.ndjson" &
+STOP_CHAT_PID=$!
+stop_running=0
+for _ in $(seq 1 50); do
+  if curl -fsS "http://127.0.0.1:$SLOWWEBPORT/api/sessions/$STOP_SID" | grep -q '"running":true'; then
+    stop_running=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$stop_running" -ne 1 ]; then
+  echo "stop test run did not start" >&2
+  exit 1
+fi
+curl -fsS -X POST "http://127.0.0.1:$SLOWWEBPORT/api/sessions/$STOP_SID/stop" >"$TMP/stop.json"
+grep -q '"stopped":true' "$TMP/stop.json"
+wait "$STOP_CHAT_PID"
+grep -q '"message":"stopped"' "$TMP/stop-chat.ndjson"
+curl -fsS "http://127.0.0.1:$SLOWWEBPORT/api/sessions/$STOP_SID" >"$TMP/stop-session-after.json"
+grep -q '"running":false' "$TMP/stop-session-after.json"
+STOP_UNKNOWN=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  "http://127.0.0.1:$SLOWWEBPORT/api/sessions/$STOP_SID/stop")
+if [ "$STOP_UNKNOWN" != "409" ]; then
+  echo "stopping an idle session should return 409, got $STOP_UNKNOWN" >&2
   exit 1
 fi
 

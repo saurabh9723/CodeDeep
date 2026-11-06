@@ -232,6 +232,11 @@ func (r *renderer) Emit(ev agent.Event) {
 		r.ensureNL()
 		fmt.Fprintf(r.out, "%s %s\n", r.p.yellow("compacted"), r.p.dim(ev.Message))
 
+	case agent.EventRetry:
+		r.ensureNL()
+		r.inReasoning = false
+		fmt.Fprintf(r.out, "%s %s\n", r.p.yellow("retry"), r.p.dim(retryMessage(ev.Retry)))
+
 	case agent.EventSubagentStart:
 		r.ensureNL()
 		fmt.Fprintf(r.out, "%s %s %s\n", r.p.magenta("⌁ subagent"), r.p.bold(ev.Name), r.p.dim("started"))
@@ -432,6 +437,18 @@ func humanCost(usd float64) string {
 	default:
 		return fmt.Sprintf("~$%.2f", usd)
 	}
+}
+
+func retryMessage(n *llm.RetryNotice) string {
+	if n == nil {
+		return "provider busy"
+	}
+	reason := n.Message
+	if reason == "" {
+		reason = "provider busy"
+	}
+	delay := util.HumanDuration(time.Duration(n.DelayMS) * time.Millisecond)
+	return fmt.Sprintf("%s — retrying in %s (attempt %d/%d)", reason, delay, n.Attempt, n.Max)
 }
 
 func outputSummary(ev agent.Event) string {

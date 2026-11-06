@@ -282,7 +282,11 @@ func (c *AnthropicClient) Stream(ctx context.Context, req ChatRequest, onDelta f
 			}
 			lastErr = err
 			if attempt < maxAttempts-1 {
-				if werr := sleepCtx(ctx, backoff(attempt)); werr != nil {
+				delay := retryDelay(attempt, nil)
+				if nerr := notifyRetry(onDelta, attempt+1, maxAttempts, 0, err, delay); nerr != nil {
+					return nil, nerr
+				}
+				if werr := sleepCtx(ctx, delay); werr != nil {
 					return nil, werr
 				}
 				continue
@@ -295,7 +299,11 @@ func (c *AnthropicClient) Stream(ctx context.Context, req ChatRequest, onDelta f
 			apiErr := parseAPIError(httpResp.StatusCode, data)
 			if retryableStatus(httpResp.StatusCode) && attempt < maxAttempts-1 {
 				lastErr = apiErr
-				if werr := sleepCtx(ctx, backoff(attempt)); werr != nil {
+				delay := retryDelay(attempt, httpResp)
+				if nerr := notifyRetry(onDelta, attempt+1, maxAttempts, httpResp.StatusCode, apiErr, delay); nerr != nil {
+					return nil, nerr
+				}
+				if werr := sleepCtx(ctx, delay); werr != nil {
 					return nil, werr
 				}
 				continue
@@ -449,7 +457,7 @@ func (c *AnthropicClient) Complete(ctx context.Context, req ChatRequest) (*Respo
 			}
 			lastErr = err
 			if attempt < 2 {
-				if werr := sleepCtx(ctx, backoff(attempt)); werr != nil {
+				if werr := sleepCtx(ctx, retryDelay(attempt, nil)); werr != nil {
 					return nil, werr
 				}
 				continue
@@ -462,7 +470,7 @@ func (c *AnthropicClient) Complete(ctx context.Context, req ChatRequest) (*Respo
 			apiErr := parseAPIError(httpResp.StatusCode, data)
 			if retryableStatus(httpResp.StatusCode) && attempt < 2 {
 				lastErr = apiErr
-				if werr := sleepCtx(ctx, backoff(attempt)); werr != nil {
+				if werr := sleepCtx(ctx, retryDelay(attempt, httpResp)); werr != nil {
 					return nil, werr
 				}
 				continue

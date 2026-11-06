@@ -23,6 +23,8 @@ const (
 	EventSubagentEnd    = "subagent_end"
 	EventHook           = "hook"
 	EventDiagnostics    = "diagnostics"
+	EventRetry          = "retry"
+	EventSaved          = "saved"
 	EventDone           = "done"
 	EventError          = "error"
 )
@@ -49,8 +51,12 @@ type Event struct {
 	CostUSD     float64                  `json:"cost_usd,omitempty"`
 	TotalCost   float64                  `json:"total_cost_usd,omitempty"`
 	Checkpoints int                      `json:"checkpoints,omitempty"`
+	Retry       *llm.RetryNotice         `json:"retry,omitempty"`
 	Message     string                   `json:"message,omitempty"`
 	Annotations []diagnostics.Diagnostic `json:"annotations,omitempty"`
+	// Seq is assigned by the web transport so reconnecting clients can resume
+	// exactly where they left off. Other emitters leave it zero.
+	Seq int64 `json:"seq,omitempty"`
 }
 
 type Emitter func(Event)
