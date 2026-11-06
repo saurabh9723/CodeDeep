@@ -1,0 +1,35 @@
+{
+  "name": "parallel-reads",
+  "description": "Run independent read-only searches in one turn and synthesize both results.",
+  "tags": ["capability", "tools"],
+  "prompt": "Find every Go file and locate the main function. Use glob and grep, then summarize.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "tools": {
+      "required": ["glob", "grep"],
+      "counts": {
+        "glob": 1,
+        "grep": 1
+      },
+      "no_errors": true,
+      "output_contains": {
+        "glob": ["cmd/main.go"],
+        "grep": ["func main"]
+      }
+    },
+    "events": {
+      "min": {
+        "tool_start": 2
+      }
+    },
+    "text_contains": ["cmd/main.go"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 2,
+    "strict": true
+  }
+}

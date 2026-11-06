@@ -1,0 +1,32 @@
+{
+  "name": "edit-existing",
+  "description": "Change an existing file with a targeted edit and leave the rest untouched.",
+  "tags": ["capability", "file"],
+  "prompt": "Change config.txt from draft mode to production mode. Keep the file format intact.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "files": [
+      {
+        "path": "config.txt",
+        "equals": "mode=production\n"
+      }
+    ],
+    "tools": {
+      "required": ["edit_file"],
+      "counts": {
+        "edit_file": 1
+      },
+      "forbidden": ["write_file"],
+      "no_errors": true
+    },
+    "text_contains": ["production"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 1,
+    "strict": true
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "memory-roundtrip",
+  "description": "Persist a durable project note with remember, then confirm it with recall.",
+  "tags": ["capability", "memory"],
+  "prompt": "Remember that this project builds with go build ./... and then recall the note to confirm it was saved.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "tools": {
+      "required": ["remember", "recall"],
+      "counts": {
+        "remember": 1,
+        "recall": 1
+      },
+      "no_errors": true,
+      "output_contains": {
+        "remember": ["Saved memory"],
+        "recall": ["go build ./..."]
+      }
+    },
+    "text_contains": ["go build ./..."],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 3,
+    "max_tool_calls": 2,
+    "strict": true
+  }
+}

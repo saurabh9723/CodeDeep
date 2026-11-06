@@ -1,0 +1,32 @@
+{
+  "steps": [
+    {
+      "reasoning": "The user asked for a multi-step plan, so I will record it before acting.",
+      "text": "Recording the migration plan.",
+      "calls": [
+        {
+          "name": "todo_write",
+          "args": {
+            "todos": [
+              {
+                "text": "inspect the workspace",
+                "status": "completed"
+              },
+              {
+                "text": "write the migration command",
+                "status": "in_progress"
+              },
+              {
+                "text": "report the result",
+                "status": "pending"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "The plan is recorded: inspect, write, report."
+    }
+  ]
+}

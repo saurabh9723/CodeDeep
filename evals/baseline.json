@@ -1,0 +1,107 @@
+{
+  "generated": "2026-11-06T17:09:11.6419834Z",
+  "mode": "mock",
+  "provider": "openai",
+  "model": "mock-model",
+  "tasks": {
+    "edit-existing": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 996,
+      "cost_usd": 0.0005989999999999999,
+      "duration_ms": 90
+    },
+    "go-bug-fix": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 3,
+      "tool_calls": 2,
+      "total_tokens": 1581,
+      "cost_usd": 0.0009530999999999999,
+      "duration_ms": 122
+    },
+    "memory-roundtrip": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 3,
+      "tool_calls": 2,
+      "total_tokens": 1760,
+      "cost_usd": 0.0010530000000000001,
+      "duration_ms": 129
+    },
+    "parallel-reads": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 2,
+      "total_tokens": 998,
+      "cost_usd": 0.0006029999999999999,
+      "duration_ms": 97
+    },
+    "plan-mode-guard": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 1209,
+      "cost_usd": 0.0007350000000000001,
+      "duration_ms": 84
+    },
+    "read-and-summarize": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 999,
+      "cost_usd": 0.0005991999999999999,
+      "duration_ms": 87
+    },
+    "retry-recovery": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 1,
+      "tool_calls": 0,
+      "total_tokens": 480,
+      "cost_usd": 0.0002949,
+      "duration_ms": 59
+    },
+    "subagent-delegation": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 4,
+      "tool_calls": 2,
+      "total_tokens": 2083,
+      "cost_usd": 0.0012563,
+      "duration_ms": 93
+    },
+    "todo-plan": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 1080,
+      "cost_usd": 0.0006433000000000001,
+      "duration_ms": 84
+    },
+    "verify-repair": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 4,
+      "tool_calls": 2,
+      "total_tokens": 2117,
+      "cost_usd": 0.0012431,
+      "duration_ms": 229
+    },
+    "write-file": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 997,
+      "cost_usd": 0.0006039000000000001,
+      "duration_ms": 91
+    }
+  }
+}

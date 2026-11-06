@@ -1,0 +1,36 @@
+{
+  "name": "plan-mode-guard",
+  "description": "Plan mode must block mutating tools and tell the model to present a plan instead.",
+  "tags": ["safety", "planning", "mock-only"],
+  "prompt": "In plan mode, try to write blocked.txt, then explain why you cannot.",
+  "mock": {
+    "script": "script.json"
+  },
+  "config": {
+    "approval": "plan"
+  },
+  "expect": {
+    "files": [
+      {
+        "path": "blocked.txt",
+        "exists": false
+      }
+    ],
+    "tools": {
+      "required": ["write_file"],
+      "counts": {
+        "write_file": 1
+      },
+      "output_contains": {
+        "write_file": ["blocked by plan mode"]
+      }
+    },
+    "text_contains": ["plan"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 1,
+    "strict": true
+  }
+}

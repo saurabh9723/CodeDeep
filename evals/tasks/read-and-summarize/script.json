@@ -1,0 +1,19 @@
+{
+  "steps": [
+    {
+      "reasoning": "I should read the file before answering so the greeting is exact.",
+      "text": "Reading app.go first.",
+      "calls": [
+        {
+          "name": "read_file",
+          "args": {
+            "path": "app.go"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The greeting constant is \"hello from the eval fixture\"."
+    }
+  ]
+}

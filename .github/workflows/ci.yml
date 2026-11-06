@@ -52,3 +52,20 @@ jobs:
 
       - name: Run smoke test
         run: bash scripts/e2e-smoke.sh
+
+  eval:
+    name: Eval harness (mock)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build codedeep
+        run: go build -o bin/codedeep ./cmd/codedeep
+
+      - name: Run deterministic eval suite
+        run: ./bin/codedeep eval -jobs 2 -baseline evals/baseline.json -fail-on-regression

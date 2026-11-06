@@ -1,0 +1,31 @@
+{
+  "name": "write-file",
+  "description": "Create a new file with exact content, verify it on disk, and report success.",
+  "tags": ["capability", "file"],
+  "prompt": "Create report.txt containing an eval marker line \"status: ok\" and then summarize what you did.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "files": [
+      {
+        "path": "report.txt",
+        "contains": "status: ok"
+      }
+    ],
+    "tools": {
+      "required": ["write_file"],
+      "counts": {
+        "write_file": 1
+      },
+      "no_errors": true
+    },
+    "text_contains": ["report.txt"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 1,
+    "strict": true
+  }
+}

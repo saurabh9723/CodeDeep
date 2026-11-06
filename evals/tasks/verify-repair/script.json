@@ -1,0 +1,36 @@
+{
+  "steps": [
+    {
+      "reasoning": "I will first write the broken state so the verification gate is exercised.",
+      "text": "Writing the first attempt.",
+      "calls": [
+        {
+          "name": "write_file",
+          "args": {
+            "path": "value.txt",
+            "content": "FAILED\n"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The fix is in place."
+    },
+    {
+      "reasoning": "Verification failed, so I will correct the file and finish again.",
+      "text": "Correcting value.txt.",
+      "calls": [
+        {
+          "name": "write_file",
+          "args": {
+            "path": "value.txt",
+            "content": "OK\n"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Verification passes now."
+    }
+  ]
+}

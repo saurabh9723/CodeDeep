@@ -1,0 +1,26 @@
+{
+  "steps": [
+    {
+      "reasoning": "Both lookups are read-only and independent, so they can run together.",
+      "text": "Listing Go files and searching for main.",
+      "calls": [
+        {
+          "name": "glob",
+          "args": {
+            "pattern": "**/*.go"
+          }
+        },
+        {
+          "name": "grep",
+          "args": {
+            "pattern": "func main",
+            "glob": "*.go"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Found cmd/main.go and located func main in it."
+    }
+  ]
+}

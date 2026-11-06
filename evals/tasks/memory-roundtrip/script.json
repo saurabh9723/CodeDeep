@@ -1,0 +1,33 @@
+{
+  "steps": [
+    {
+      "reasoning": "The build command is durable project knowledge, so I will save it.",
+      "text": "Saving the build command to project memory.",
+      "calls": [
+        {
+          "name": "remember",
+          "args": {
+            "name": "eval-build-command",
+            "description": "how the eval fixture project builds",
+            "body": "Run go build ./... to build this project."
+          }
+        }
+      ]
+    },
+    {
+      "reasoning": "I should read the note back to prove it is durable.",
+      "text": "Reading the note back.",
+      "calls": [
+        {
+          "name": "recall",
+          "args": {
+            "query": "eval build"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The note is saved and recall returns it: go build ./... builds this project."
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "steps": [
+    {
+      "reasoning": "The user wants a file with a specific marker, so I will write it directly.",
+      "text": "Creating report.txt with the eval marker.",
+      "calls": [
+        {
+          "name": "write_file",
+          "args": {
+            "path": "report.txt",
+            "content": "CodeDeep eval report\nstatus: ok\n"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Created report.txt with the requested eval marker."
+    }
+  ]
+}

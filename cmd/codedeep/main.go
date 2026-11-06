@@ -47,6 +47,8 @@ func dispatch(args []string) int {
 			return cmdStats(args[1:])
 		case "open":
 			return cmdOpen(args[1:])
+		case "eval":
+			return cmdEval(args[1:])
 		case "version", "--version", "-version", "-v":
 			fmt.Println(versionString())
 			return 0
@@ -80,6 +82,10 @@ Usage:
   codedeep stats               token, cost, cache, and tool activity
   codedeep stats -days 7 -workspace -json
   codedeep open src/main.go:42 open a file in your editor
+  codedeep eval                run the evaluation harness (mock by default)
+  codedeep eval -list          list evaluation tasks
+  codedeep eval -mode real -model deepseek-chat
+  codedeep eval -mode real -provider openai -model gpt-4o -base-url https://api.openai.com/v1
   codedeep version             print version information
 
 Common flags:
@@ -99,6 +105,29 @@ Chat flags:
   -json              emit NDJSON events instead of the terminal transcript
   -reasoning         show the model's reasoning stream
   -plain             disable colors
+
+Eval flags:
+  -mode mock|real    response source (default mock, fully offline)
+  -suite DIR         task suite directory (default evals/tasks)
+  -task REGEXP       only run matching task names
+  -tag LIST          require one of these comma-separated tags
+  -skip-tag LIST     skip these tags
+  -include-mock-only run mock-only tasks in real mode
+  -repeat N          runs per task (default 1)
+  -jobs N            parallel tasks (default 1)
+  -min-pass-rate F   fraction of repeats that must pass (default 1)
+  -baseline PATH     compare metrics against a baseline JSON
+  -update-baseline PATH  write a new baseline after the run
+  -fail-on-regression    exit non-zero when the baseline regresses
+  -regression-pct F  metric drift threshold (default 25)
+  -base-url URL      real provider base URL override
+  -binary PATH       codedeep binary under test (default: this executable)
+  -json              print the report as JSON
+  -md PATH           write a Markdown report
+  -keep              keep temporary workspaces for debugging
+  -v                 print stderr tails and workspace paths
+  -list              list tasks without running them
+  See evals/README.md for real-provider credentials and pricing flags.
 
 Environment:
   CODEAGENT_PROVIDER provider: openai, anthropic, gemini, or ollama

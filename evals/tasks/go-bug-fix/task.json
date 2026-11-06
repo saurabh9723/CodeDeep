@@ -1,0 +1,34 @@
+{
+  "name": "go-bug-fix",
+  "description": "Diagnose a failing Go test, patch the bug, and prove the fix with the external verifier.",
+  "tags": ["coding", "go", "verifier"],
+  "prompt": "The Add function in math.go fails its test. Find the bug, fix it, and run the tests.",
+  "mock": {
+    "script": "script.json"
+  },
+  "verifier": "go test ./...",
+  "verifier_timeout_sec": 120,
+  "expect": {
+    "files": [
+      {
+        "path": "math.go",
+        "contains": "return a + b"
+      }
+    ],
+    "tools": {
+      "required": ["read_file", "edit_file"],
+      "min": {
+        "read_file": 1,
+        "edit_file": 1
+      },
+      "no_errors": true
+    },
+    "verifier_exit": 0,
+    "text_contains": ["Add"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 6,
+    "max_tool_calls": 6
+  }
+}

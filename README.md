@@ -57,6 +57,10 @@ the browser.
   sessions into token/cost trends, prompt-cache hit rates, per-model breakdowns,
   tool call counts, and a 24-hour tool heatmap. Sessions record per-turn usage,
   so the report is bucketed by when the work actually happened.
+- **Evaluation harness** — `codedeep eval` runs a benchmark suite of realistic
+  tasks in isolated workspaces, scores files, tools, events, verification, and
+  cost, and compares against a baseline. Mock mode is deterministic and offline;
+  `-mode real` measures an actual provider with the same tasks.
 - **MCP** — starts stdio JSON-RPC servers and exposes their tools as
   `mcp__<server>__<tool>`; `readOnlyHint` tools skip approval.
 - **Sessions** — saved after every step, resumable by id, number, or title,
@@ -692,6 +696,12 @@ daily bucketing, range and workspace filters, cache-hit math, per-model and
 per-tool aggregation, the hourly heatmap, legacy sessions without per-turn
 stats, and the `/api/analytics` endpoint.
 
+The evaluation harness has its own tests for task discovery and strict schema
+validation, filter selection, config and environment isolation, scoring and
+budget enforcement, baseline regression detection, and an end-to-end runner test
+that builds `codedeep`, executes a scripted task through the in-process mock,
+and checks the resulting files and metrics.
+
 End-to-end smoke test (builds the binaries, starts the deterministic mock model,
 runs tool turns, and checks files and sessions on disk). It also proves provider
 retries against a rate-limited mock, that a run survives a dropped connection
@@ -704,11 +714,35 @@ and the new `doctor` lines:
 bash scripts/e2e-smoke.sh
 ```
 
+Benchmark-style evaluation suite. It runs realistic tasks in isolated
+workspaces, scores the event stream, files, and an optional external verifier,
+and tracks calls, tokens, cost, and wall time. Mock mode is deterministic and
+fully offline:
+
+```bash
+go run ./cmd/codedeep eval
+go run ./cmd/codedeep eval -repeat 3 -jobs 4
+go run ./cmd/codedeep eval -baseline evals/baseline.json -fail-on-regression
+```
+
+To measure a real model, switch mode and pass the provider/model (credentials
+stay in environment variables):
+
+```bash
+export DEEPSEEK_API_KEY="..."
+go run ./cmd/codedeep eval -mode real -provider openai -model deepseek-chat \
+  -price-in 0.27 -price-out 1.10
+```
+
+See [`evals/README.md`](evals/README.md) for the task schema, mock scripts,
+scoring rules, baselines, provider-specific commands, and isolation guarantees.
+
 Two dev servers are included:
 
 - `cmd/mockllm` — OpenAI-compatible SSE server with scenarios `basic`, `multi`,
   `subagent`, `read`, `write`, `text`, `todo`, `memory`, `flaky` (rate limits
-  the first two attempts), `xss`, `mcp`, `mcp-ro`.
+  the first two attempts), `xss`, `mcp`, `mcp-ro`. It is a thin wrapper around
+  the reusable `internal/mockllm` server.
 - `cmd/mockmcp` — minimal stdio MCP server with `echo` and the read-only
   `workspace_info`.
 
@@ -719,8 +753,9 @@ go run ./cmd/mockmcp
 
 ## Continuous integration and releases
 
-GitHub Actions runs formatting, `go vet`, `go test -race`, a full build, and the
-end-to-end smoke test on every push to `main` and every pull request.
+GitHub Actions runs formatting, `go vet`, `go test -race`, a full build, the
+end-to-end smoke test, and the mock evaluation suite (with baseline comparison)
+on every push to `main` and every pull request.
 
 To publish a release, push a version tag:
 
@@ -742,6 +777,8 @@ cmd/mockmcp       deterministic stdio MCP server
 internal/app      wiring: config, client, registry, sessions, MCP
 internal/agent    loop, compaction, subagents, system prompt, checkpoints, events
 internal/llm      provider interface, OpenAI-compatible and Anthropic/Gemini clients
+internal/mockllm  reusable scripted mock provider for tests and evals
+internal/eval     eval tasks, isolated runner, scoring, reports, and baselines
 internal/diff     unified diff engine for previews
 internal/tools    registry plus file, search, shell, and git tools
 internal/mcp      stdio JSON-RPC client and tool registration

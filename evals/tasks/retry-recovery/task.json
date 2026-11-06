@@ -1,0 +1,29 @@
+{
+  "name": "retry-recovery",
+  "description": "Recover from two transient HTTP 429 responses using Retry-After and still finish the turn.",
+  "tags": ["reliability", "retry", "mock-only"],
+  "prompt": "Answer the question after any transient rate limits clear.",
+  "mock": {
+    "scenario": "flaky",
+    "script": "script.json"
+  },
+  "expect": {
+    "tools": {
+      "forbidden": ["bash"]
+    },
+    "events": {
+      "required": ["retry"]
+    },
+    "retries": {
+      "min": 2,
+      "max": 2
+    },
+    "text_contains": ["Recovered after the rate limit"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 1,
+    "max_tool_calls": 0,
+    "strict": true
+  }
+}

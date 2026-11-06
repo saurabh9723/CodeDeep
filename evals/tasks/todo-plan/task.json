@@ -1,0 +1,31 @@
+{
+  "name": "todo-plan",
+  "description": "Record a multi-step todo plan before acting so progress is visible in the session.",
+  "tags": ["capability", "planning"],
+  "prompt": "Track this migration as a todo list: inspect the workspace, write the command, then report. Record the plan with todo_write first.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "tools": {
+      "required": ["todo_write"],
+      "counts": {
+        "todo_write": 1
+      },
+      "no_errors": true
+    },
+    "events": {
+      "required": ["todos"],
+      "min": {
+        "todos": 1
+      }
+    },
+    "text_contains": ["plan"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 1,
+    "strict": true
+  }
+}

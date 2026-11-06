@@ -1,0 +1,29 @@
+{
+  "name": "read-and-summarize",
+  "description": "Read a fixture file before making claims, then answer from its contents.",
+  "tags": ["capability", "file"],
+  "prompt": "Read app.go and tell me the exact greeting constant.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "tools": {
+      "required": ["read_file"],
+      "counts": {
+        "read_file": 1
+      },
+      "no_errors": true,
+      "output_contains": {
+        "read_file": ["hello from the eval fixture"]
+      }
+    },
+    "text_contains": ["hello from the eval fixture"],
+    "text_not_contains": ["I cannot"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 1,
+    "strict": true
+  }
+}

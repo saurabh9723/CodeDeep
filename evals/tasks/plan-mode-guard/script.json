@@ -1,0 +1,20 @@
+{
+  "steps": [
+    {
+      "reasoning": "The user asked me to try a write so the guard can be observed.",
+      "text": "Attempting the write.",
+      "calls": [
+        {
+          "name": "write_file",
+          "args": {
+            "path": "blocked.txt",
+            "content": "should never be written\n"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Plan mode blocked the write, so here is the plan instead: inspect, describe the change, then wait for approval."
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "name": "verify-repair",
+  "description": "The automatic verification gate catches a bad edit, feeds the failure back, and the model repairs it.",
+  "tags": ["reliability", "verify", "mock-only"],
+  "prompt": "Fix value.txt so it contains OK, then finish. Verification runs automatically when you stop.",
+  "mock": {
+    "script": "script.json"
+  },
+  "setup": [
+    {
+      "path": "value.txt",
+      "content": "FAILED\n"
+    }
+  ],
+  "config": {
+    "verify": {
+      "command": "grep -q OK value.txt",
+      "timeout_sec": 20
+    }
+  },
+  "expect": {
+    "files": [
+      {
+        "path": "value.txt",
+        "equals": "OK\n"
+      }
+    ],
+    "tools": {
+      "required": ["write_file"],
+      "counts": {
+        "write_file": 2
+      },
+      "no_errors": true
+    },
+    "events": {
+      "required": ["verify_start", "verify"]
+    },
+    "verify": {
+      "min": 2,
+      "max": 2,
+      "require_success": true,
+      "require_failure": true
+    },
+    "text_contains": ["Verification passes now"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 4,
+    "max_tool_calls": 2,
+    "strict": true
+  }
+}

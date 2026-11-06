@@ -1,0 +1,33 @@
+{
+  "name": "subagent-delegation",
+  "description": "Delegate a self-contained investigation to a subagent and report its findings.",
+  "tags": ["capability", "subagent"],
+  "prompt": "Use the agent tool to delegate this: report the exact Greeting constant in app.go. Then tell me what the subagent found.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "tools": {
+      "required": ["agent"],
+      "counts": {
+        "agent": 1
+      },
+      "no_errors": true
+    },
+    "events": {
+      "required": ["subagent_start", "subagent_end"]
+    },
+    "subagents": {
+      "min": 1,
+      "max": 1,
+      "require_success": true
+    },
+    "text_contains": ["hello from the eval fixture"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 4,
+    "max_tool_calls": 2,
+    "strict": true
+  }
+}

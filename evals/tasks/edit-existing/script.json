@@ -1,0 +1,21 @@
+{
+  "steps": [
+    {
+      "reasoning": "A single exact substring change is enough, so edit_file is safer than a rewrite.",
+      "text": "Switching the config to production mode.",
+      "calls": [
+        {
+          "name": "edit_file",
+          "args": {
+            "path": "config.txt",
+            "old_string": "mode=draft",
+            "new_string": "mode=production"
+          }
+        }
+      ]
+    },
+    {
+      "text": "config.txt now sets mode=production."
+    }
+  ]
+}
