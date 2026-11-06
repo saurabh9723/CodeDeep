@@ -1,0 +1,80 @@
+{
+  "generated": "2026-11-06T18:43:02.5308807Z",
+  "mode": "real",
+  "provider": "ollama",
+  "model": "qwen2.5:3b",
+  "tasks": {
+    "edit-existing": {
+      "passed": false,
+      "pass_rate": 0.6666666666666666,
+      "model_calls": 3,
+      "tool_calls": 2,
+      "total_tokens": 7350,
+      "cost_usd": 0,
+      "duration_ms": 54545
+    },
+    "go-bug-fix": {
+      "passed": false,
+      "pass_rate": 0,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 4926,
+      "cost_usd": 0,
+      "duration_ms": 70519
+    },
+    "memory-roundtrip": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 2,
+      "total_tokens": 5036,
+      "cost_usd": 0,
+      "duration_ms": 79874
+    },
+    "parallel-reads": {
+      "passed": false,
+      "pass_rate": 0.6666666666666666,
+      "model_calls": 2,
+      "tool_calls": 2,
+      "total_tokens": 4922,
+      "cost_usd": 0,
+      "duration_ms": 60222
+    },
+    "read-and-summarize": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 4833,
+      "cost_usd": 0,
+      "duration_ms": 45946
+    },
+    "subagent-delegation": {
+      "passed": false,
+      "pass_rate": 0.6666666666666666,
+      "model_calls": 4,
+      "tool_calls": 2,
+      "total_tokens": 9482,
+      "cost_usd": 0,
+      "duration_ms": 86974
+    },
+    "todo-plan": {
+      "passed": false,
+      "pass_rate": 0.3333333333333333,
+      "model_calls": 4,
+      "tool_calls": 3,
+      "total_tokens": 10924,
+      "cost_usd": 0,
+      "duration_ms": 107449
+    },
+    "write-file": {
+      "passed": true,
+      "pass_rate": 1,
+      "model_calls": 2,
+      "tool_calls": 1,
+      "total_tokens": 4903,
+      "cost_usd": 0,
+      "duration_ms": 54163
+    }
+  }
+}

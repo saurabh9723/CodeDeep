@@ -365,27 +365,40 @@ func TestBaselineDetectsPassAndMetricRegressions(t *testing.T) {
 	base := Baseline{
 		Mode: ModeMock,
 		Tasks: map[string]BaselineTask{
-			"was-passing": {Passed: true, PassRate: 1, ModelCalls: 2, ToolCalls: 1, TotalTokens: 1000, CostUSD: 0.001},
-			"costly":      {Passed: true, PassRate: 1, ModelCalls: 10, ToolCalls: 5, TotalTokens: 5000, CostUSD: 0.01},
-			"fast":        {Passed: true, PassRate: 1, ModelCalls: 1, TotalTokens: 10, DurationMS: 100},
-			"slow":        {Passed: true, PassRate: 1, ModelCalls: 1, TotalTokens: 10, DurationMS: 1000},
+			"was-passing":  {Passed: true, PassRate: 1, ModelCalls: 2, ToolCalls: 1, TotalTokens: 1000, CostUSD: 0.001},
+			"costly":       {Passed: true, PassRate: 1, ModelCalls: 10, ToolCalls: 5, TotalTokens: 5000, CostUSD: 0.01},
+			"fast":         {Passed: true, PassRate: 1, ModelCalls: 1, TotalTokens: 10, DurationMS: 100},
+			"slow":         {Passed: true, PassRate: 1, ModelCalls: 1, TotalTokens: 10, DurationMS: 1000},
+			"flaky-worse":  {Passed: false, PassRate: 2.0 / 3, ModelCalls: 2, ToolCalls: 1, TotalTokens: 1000},
+			"flaky-better": {Passed: false, PassRate: 0, ModelCalls: 2, ToolCalls: 1, TotalTokens: 1000},
 		},
 	}
 	report := Report{
 		Mode: ModeMock,
 		Tasks: []TaskResult{
 			{Name: "was-passing", Status: StatusFailed, Metrics: Metrics{ModelCalls: 2, ToolCalls: 1}},
-			{Name: "costly", Status: StatusPassed, Passed: true, Metrics: Metrics{ModelCalls: 20, ToolCalls: 5,
+			{Name: "costly", Status: StatusPassed, Passed: true, PassRate: 1, Metrics: Metrics{ModelCalls: 20, ToolCalls: 5,
 				Usage: llm.Usage{TotalTokens: 5500}, CostUSD: 0.01}},
-			{Name: "fast", Status: StatusPassed, Passed: true, Metrics: Metrics{ModelCalls: 1,
+			{Name: "fast", Status: StatusPassed, Passed: true, PassRate: 1, Metrics: Metrics{ModelCalls: 1,
 				Usage: llm.Usage{TotalTokens: 10}, DurationMS: 400}},
-			{Name: "slow", Status: StatusPassed, Passed: true, Metrics: Metrics{ModelCalls: 1,
+			{Name: "slow", Status: StatusPassed, Passed: true, PassRate: 1, Metrics: Metrics{ModelCalls: 1,
 				Usage: llm.Usage{TotalTokens: 10}, DurationMS: 2600}},
+			{Name: "flaky-worse", Status: StatusFailed, PassRate: 1.0 / 3, Metrics: Metrics{ModelCalls: 2, ToolCalls: 1,
+				Usage: llm.Usage{TotalTokens: 1000}}},
+			{Name: "flaky-better", Status: StatusFailed, PassRate: 1.0 / 3, Metrics: Metrics{ModelCalls: 2, ToolCalls: 1,
+				Usage: llm.Usage{TotalTokens: 1000}}},
 		},
 	}
 	comparison := ApplyBaseline(&report, &base, "base.json", 25)
-	if comparison.Regressions < 2 {
-		t.Fatalf("want pass and metric regressions, got %+v", comparison)
+	if comparison.Regressions != 3 {
+		t.Fatalf("want pass, metric, and pass-rate regressions, got %+v", comparison)
+	}
+	if report.Tasks[4].Baseline == nil || report.Tasks[4].Baseline.Status != "regressed" ||
+		!strings.Contains(strings.Join(report.Tasks[4].Baseline.Reasons, " "), "pass rate 67% -> 33%") {
+		t.Fatalf("pass-rate regression not annotated: %+v", report.Tasks[4].Baseline)
+	}
+	if report.Tasks[5].Baseline == nil || report.Tasks[5].Baseline.Status != "improved" {
+		t.Fatalf("pass-rate improvement not annotated: %+v", report.Tasks[5].Baseline)
 	}
 	if report.Tasks[0].Baseline == nil || report.Tasks[0].Baseline.Status != "regressed" {
 		t.Fatalf("pass regression not annotated: %+v", report.Tasks[0].Baseline)

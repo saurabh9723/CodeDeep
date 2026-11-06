@@ -231,11 +231,14 @@ go run ./cmd/codedeep eval -update-baseline evals/baseline.json
 go run ./cmd/codedeep eval -baseline evals/baseline.json -fail-on-regression
 ```
 
-Regressions include a task that passed in the baseline but fails now, and metric
-increases over `-regression-pct` (default 25%) for model calls, tool calls,
-tokens, and cost. Timing is only a warning. Improvements are reported but do not
-fail the run. Tasks present in the baseline but not selected for the current run
-produce a warning so accidental filters are visible.
+Regressions include a task that passed in the baseline but fails now, a pass
+rate that drops by more than `-regression-pct` (default 25%), and metric
+increases over the same threshold for model calls, tool calls, tokens, and cost.
+The pass-rate check matters for real-model runs recorded with `-repeat`: 3/3 →
+2/3 is a reliability regression even though both runs are nominally "flaky".
+Timing is only a warning. Improvements are reported but do not fail the run.
+Tasks present in the baseline but not selected for the current run produce a
+warning so accidental filters are visible.
 
 Use a separate baseline per real model, for example
 `evals/baseline.deepseek-chat.json`. Cross-model comparisons are not meaningful

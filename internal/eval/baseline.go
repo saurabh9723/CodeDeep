@@ -118,15 +118,29 @@ func ApplyBaseline(report *Report, base *Baseline, path string, thresholdPct flo
 		}
 		delta := &BaselineDelta{Status: "same"}
 		var improved bool
-		if record.Passed && !task.Passed {
+		switch {
+		case record.Passed && !task.Passed:
 			delta.Status = "regressed"
 			delta.Reasons = append(delta.Reasons, "passed in the baseline, fails now")
 			comparison.Regressions++
-		} else if !record.Passed && task.Passed {
+		case !record.Passed && task.Passed:
 			delta.Status = "improved"
 			delta.Reasons = append(delta.Reasons, "failed in the baseline, passes now")
 			improved = true
 			comparison.Improvements++
+		case task.PassRate < record.PassRate:
+			// Repeated real-model runs rarely flip cleanly between pass and
+			// fail, so a pass-rate drop is its own regression signal.
+			if drop := -pctChange(record.PassRate, task.PassRate); drop > thresholdPct {
+				delta.Status = "regressed"
+				delta.Reasons = append(delta.Reasons,
+					fmt.Sprintf("pass rate %.0f%% -> %.0f%%", record.PassRate*100, task.PassRate*100))
+				comparison.Regressions++
+			}
+		case task.PassRate > record.PassRate:
+			if rise := pctChange(record.PassRate, task.PassRate); rise > thresholdPct {
+				improved = true
+			}
 		}
 		if delta.Status != "improved" {
 			if reason, regressed := metricRegression("model calls", float64(record.ModelCalls), float64(task.Metrics.ModelCalls), thresholdPct, 1, &delta.CallsPct); regressed {
