@@ -8,6 +8,7 @@
   },
   "verifier": "go test ./...",
   "verifier_timeout_sec": 120,
+  "timeout_sec_real": 420,
   "expect": {
     "files": [
       {
@@ -29,6 +30,10 @@
   },
   "budget": {
     "max_model_calls": 6,
-    "max_tool_calls": 6
+    "max_tool_calls": 6,
+    "real": {
+      "max_model_calls": 12,
+      "max_tool_calls": 12
+    }
   }
 }

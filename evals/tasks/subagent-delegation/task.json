@@ -28,6 +28,11 @@
   "budget": {
     "max_model_calls": 4,
     "max_tool_calls": 2,
-    "strict": true
+    "strict": true,
+    "real": {
+      "max_model_calls": 10,
+      "max_tool_calls": 6,
+      "strict": true
+    }
   }
 }

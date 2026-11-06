@@ -97,6 +97,7 @@ directory and an optional script file:
   "tags": ["capability", "file"],
   "prompt": "Create report.txt containing status: ok.",
   "timeout_sec": 90,
+  "timeout_sec_real": 300,
   "fixture_dir": "files",
   "setup": [{ "path": "notes.txt", "content": "seeded\n", "mode": "0644" }],
   "config": {
@@ -132,7 +133,12 @@ directory and an optional script file:
     "max_total_tokens": 8000,
     "max_cost_usd": 0.01,
     "max_duration_ms": 30000,
-    "strict": false
+    "strict": false,
+    "real": {
+      "max_model_calls": 8,
+      "max_tool_calls": 6,
+      "strict": true
+    }
   },
   "verifier": "go test ./...",
   "verifier_timeout_sec": 120
@@ -156,6 +162,14 @@ Field notes:
   tool name.
 - Budgets are warnings by default so noisy timing/token drift does not fail CI.
   Set `"strict": true` to make any exceeded budget a hard failure.
+- `budget.real` overrides the thresholds for real-model runs. Scripted mock
+  trajectories are efficient by construction; a real model usually reads a file
+  before editing it or takes an extra turn, so the checked-in tasks give real
+  runs more headroom while still catching runaway loops. When `budget.real` is
+  absent, real runs fall back to the base thresholds.
+- `timeout_sec` applies to mock runs (default 90s). `timeout_sec_real` applies
+  to real runs and defaults to 300s, because a model call over a local or hosted
+  API takes far longer than a scripted response.
 - `expect.verifier_exit` defaults to `0` when a `verifier` is configured.
 
 Strict JSON decoding is intentional: a misspelled field is an error, not a
@@ -243,8 +257,10 @@ go run ./cmd/codedeep eval \
   -model deepseek-chat
 ```
 
-Nothing else changes. Prompts, fixtures, expectations, verifier, budgets, repeat
-count, and reporting stay the same. Tasks tagged `mock-only` are skipped and
+Prompts, fixtures, expectations, verifier, repeat count, and reporting stay the
+same. Budgets and timeouts switch automatically: real runs use `budget.real`
+and `timeout_sec_real` when a task defines them, otherwise they use the base
+budget and a 300s default timeout. Tasks tagged `mock-only` are skipped and
 listed with a reason.
 
 ### Provider commands and credentials
@@ -335,6 +351,10 @@ efficiency, but the numbers are not directly comparable across models.
 ### What to expect in real mode
 
 - Output is not deterministic. Use `-repeat 3` and judge tasks by pass rate.
+- Real runs use the relaxed `budget.real` thresholds and a 300s default timeout.
+  A tiny local model can still exceed those on a slow CPU; raise
+  `timeout_sec_real` or lower `-jobs` if a run is timing out rather than
+  failing an assertion.
 - Do not reuse the mock baseline. Create a baseline for the model you ship:
   ```bash
   go run ./cmd/codedeep eval -mode real -provider ollama -model qwen2.5-coder:7b \

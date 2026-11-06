@@ -249,7 +249,7 @@ func TestCheckTaskFailuresAndBudgets(t *testing.T) {
 			Verify:        VerifyExpect{Min: 2, RequireFailure: true},
 			NoErrorEvents: true,
 		},
-		Budget: Budget{MaxModelCalls: 2},
+		Budget: Budget{BudgetLimits: BudgetLimits{MaxModelCalls: 2}},
 	}
 	obs := Observation{
 		ModelCalls:  5,
@@ -258,7 +258,7 @@ func TestCheckTaskFailuresAndBudgets(t *testing.T) {
 		Errors:      []string{"boom"},
 		Verifies:    []VerifyRecord{{Command: "test"}},
 	}
-	failures, warnings := checkTask(task, obs, nil, workspace, 10, 0, false)
+	failures, warnings := checkTask(task, obs, nil, workspace, 10, 0, false, ModeMock)
 	joined := strings.Join(failures, "\n")
 	for _, want := range []string{"missing.txt", "read_file", "write_file", "subagents", "verify", "error events"} {
 		if !strings.Contains(joined, want) {
@@ -270,14 +270,94 @@ func TestCheckTaskFailuresAndBudgets(t *testing.T) {
 	}
 
 	task.Budget.Strict = true
-	failures, warnings = checkTask(task, obs, nil, workspace, 10, 0, false)
+	failures, warnings = checkTask(task, obs, nil, workspace, 10, 0, false, ModeMock)
 	if len(warnings) != 0 || !strings.Contains(strings.Join(failures, "\n"), "budget: model calls") {
 		t.Fatalf("strict budget should fail, warnings=%v failures=%v", warnings, failures)
 	}
 
-	failures, _ = checkTask(Task{Name: "timeout", TimeoutSec: 1}, Observation{EventCounts: map[string]int{}}, nil, workspace, 10, 1, true)
+	failures, _ = checkTask(Task{Name: "timeout", TimeoutSec: 1}, Observation{EventCounts: map[string]int{}}, nil, workspace, 10, 1, true, ModeMock)
 	if !strings.Contains(strings.Join(failures, "\n"), "timed out") {
 		t.Fatalf("timeout not reported: %v", failures)
+	}
+}
+
+func TestRealModeUsesRelaxedBudgetAndTimeout(t *testing.T) {
+	task := Task{
+		Name: "mode-aware",
+		Budget: Budget{
+			BudgetLimits: BudgetLimits{MaxModelCalls: 2, MaxToolCalls: 1, Strict: true},
+			Real:         &BudgetLimits{MaxModelCalls: 5, MaxToolCalls: 4, Strict: true},
+		},
+	}
+	obs := Observation{ModelCalls: 4, ToolCalls: 3, ToolCounts: map[string]int{}, EventCounts: map[string]int{}}
+	workspace := t.TempDir()
+
+	failures, _ := checkTask(task, obs, nil, workspace, 10, 0, false, ModeMock)
+	if len(failures) != 2 {
+		t.Fatalf("mock budget should fail both limits, got %v", failures)
+	}
+	failures, _ = checkTask(task, obs, nil, workspace, 10, 0, false, ModeReal)
+	if len(failures) != 0 {
+		t.Fatalf("real budget should allow extra steps, got %v", failures)
+	}
+
+	obs.ModelCalls, obs.ToolCalls = 6, 5
+	failures, _ = checkTask(task, obs, nil, workspace, 10, 0, false, ModeReal)
+	if len(failures) != 2 {
+		t.Fatalf("real budget must still catch runaway runs, got %v", failures)
+	}
+
+	if got := task.Timeout(ModeMock); got != 90*time.Second {
+		t.Fatalf("mock default timeout = %s, want 1m30s", got)
+	}
+	if got := task.Timeout(ModeReal); got != 300*time.Second {
+		t.Fatalf("real default timeout = %s, want 5m0s", got)
+	}
+	task.TimeoutSec, task.TimeoutSecReal = 120, 420
+	if got := task.Timeout(ModeMock); got != 120*time.Second {
+		t.Fatalf("mock timeout = %s, want 2m0s", got)
+	}
+	if got := task.Timeout(ModeReal); got != 420*time.Second {
+		t.Fatalf("real timeout = %s, want 7m0s", got)
+	}
+}
+
+func TestLoadRealOverrides(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "real")
+	writeFile(t, filepath.Join(dir, "task.json"), `{
+	  "prompt": "x",
+	  "timeout_sec": 60,
+	  "timeout_sec_real": 420,
+	  "budget": {
+	    "max_model_calls": 2,
+	    "strict": true,
+	    "real": {"max_model_calls": 10, "max_tool_calls": 8}
+	  }
+	}`)
+	task, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := task.Timeout(ModeReal); got != 420*time.Second {
+		t.Fatalf("real timeout = %s, want 7m0s", got)
+	}
+	mockBudget := task.Budget.ForMode(ModeMock)
+	if mockBudget.MaxModelCalls != 2 || !mockBudget.Strict {
+		t.Fatalf("mock budget = %+v", mockBudget)
+	}
+	realBudget := task.Budget.ForMode(ModeReal)
+	if realBudget.MaxModelCalls != 10 || realBudget.MaxToolCalls != 8 || realBudget.Strict {
+		t.Fatalf("real budget = %+v", realBudget)
+	}
+
+	writeFile(t, filepath.Join(dir, "task.json"), `{"prompt":"x","timeout_sec_real":-1}`)
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "timeout_sec_real") {
+		t.Fatalf("want negative timeout error, got %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "task.json"), `{"prompt":"x","budget":{"real":{"max_tool_calls":-1}}}`)
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "budget.real") {
+		t.Fatalf("want negative budget error, got %v", err)
 	}
 }
 

@@ -391,7 +391,7 @@ func runOnce(ctx context.Context, opts Options, task Task, runDir, gocache, bina
 		GoCache:     gocache,
 	})
 
-	runCtx, cancel := context.WithTimeout(ctx, task.Timeout())
+	runCtx, cancel := context.WithTimeout(ctx, task.Timeout(opts.Mode))
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, binary,
 		"-config", cfgPath,
@@ -437,7 +437,7 @@ func runOnce(ctx context.Context, opts Options, task Task, runDir, gocache, bina
 	obs.InvalidLines = invalidLines
 
 	verifier := runVerifier(ctx, task, workspace, env)
-	failures, warnings := checkTask(task, obs, verifier, workspace, durationMS, exitCode, timedOut)
+	failures, warnings := checkTask(task, obs, verifier, workspace, durationMS, exitCode, timedOut, opts.Mode)
 	if len(events) == 0 {
 		failures = append(failures, "no agent events were emitted")
 	}

@@ -49,6 +49,7 @@ type Task struct {
 	SkipReason         string         `json:"skip_reason,omitempty"`
 	Mock               Mock           `json:"mock,omitempty"`
 	TimeoutSec         int            `json:"timeout_sec,omitempty"`
+	TimeoutSecReal     int            `json:"timeout_sec_real,omitempty"`
 	FixtureDir         string         `json:"fixture_dir,omitempty"`
 	Setup              []SetupFile    `json:"setup,omitempty"`
 	Config             map[string]any `json:"config,omitempty"`
@@ -145,13 +146,29 @@ type VerifyExpect struct {
 }
 
 // Budget bounds efficiency. Violations are warnings unless Strict is set.
+// Real overrides the thresholds for real-model runs, which naturally take
+// extra steps that scripted mock trajectories skip.
 type Budget struct {
+	BudgetLimits
+	Real *BudgetLimits `json:"real,omitempty"`
+}
+
+// BudgetLimits are the thresholds for one run mode.
+type BudgetLimits struct {
 	MaxModelCalls  int     `json:"max_model_calls,omitempty"`
 	MaxToolCalls   int     `json:"max_tool_calls,omitempty"`
 	MaxTotalTokens int     `json:"max_total_tokens,omitempty"`
 	MaxCostUSD     float64 `json:"max_cost_usd,omitempty"`
 	MaxDurationMS  int64   `json:"max_duration_ms,omitempty"`
 	Strict         bool    `json:"strict,omitempty"`
+}
+
+// ForMode returns the thresholds enforced for a run mode.
+func (b Budget) ForMode(mode Mode) BudgetLimits {
+	if mode == ModeReal && b.Real != nil {
+		return *b.Real
+	}
+	return b.BudgetLimits
 }
 
 // Discover loads every task under root. A root that is itself a task
@@ -251,10 +268,16 @@ func Load(dir string) (Task, error) {
 		return Task{}, fmt.Errorf("%s: timeout_sec must be >= 0", path)
 	}
 	if task.TimeoutSec == 0 {
-		task.TimeoutSec = 90
+		task.TimeoutSec = defaultTimeoutSec
 	}
-	if task.TimeoutSec > 900 {
-		task.TimeoutSec = 900
+	if task.TimeoutSec > maxTimeoutSec {
+		task.TimeoutSec = maxTimeoutSec
+	}
+	if task.TimeoutSecReal < 0 {
+		return Task{}, fmt.Errorf("%s: timeout_sec_real must be >= 0", path)
+	}
+	if task.TimeoutSecReal > maxTimeoutSec {
+		task.TimeoutSecReal = maxTimeoutSec
 	}
 	if task.VerifierTimeoutSec < 0 {
 		return Task{}, fmt.Errorf("%s: verifier_timeout_sec must be >= 0", path)
@@ -281,9 +304,13 @@ func (t *Task) validate() error {
 	if strings.TrimSpace(t.Verifier) == "" && t.Expect.VerifierExit != nil {
 		return fmt.Errorf("expect.verifier_exit requires a verifier command")
 	}
-	if t.Budget.MaxModelCalls < 0 || t.Budget.MaxToolCalls < 0 || t.Budget.MaxTotalTokens < 0 ||
-		t.Budget.MaxCostUSD < 0 || t.Budget.MaxDurationMS < 0 {
-		return fmt.Errorf("budget values must be >= 0")
+	if err := validateBudget("budget", t.Budget.BudgetLimits); err != nil {
+		return err
+	}
+	if t.Budget.Real != nil {
+		if err := validateBudget("budget.real", *t.Budget.Real); err != nil {
+			return err
+		}
 	}
 	for _, key := range []string{"provider", "model", "base_url", "api_key", "sessions_dir", "allow_outside"} {
 		if _, ok := t.Config[key]; ok {
@@ -348,6 +375,14 @@ func (t *Task) validate() error {
 	}
 	if _, err := safeJoin(".", t.FixtureDir); err != nil {
 		return fmt.Errorf("fixture_dir: %w", err)
+	}
+	return nil
+}
+
+func validateBudget(name string, b BudgetLimits) error {
+	if b.MaxModelCalls < 0 || b.MaxToolCalls < 0 || b.MaxTotalTokens < 0 ||
+		b.MaxCostUSD < 0 || b.MaxDurationMS < 0 {
+		return fmt.Errorf("%s values must be >= 0", name)
 	}
 	return nil
 }
@@ -450,11 +485,24 @@ func hasAnyTag(have, want []string) bool {
 	return false
 }
 
-// Timeout returns the per-task agent process timeout.
-func (t Task) Timeout() time.Duration {
+const (
+	defaultTimeoutSec     = 90
+	defaultRealTimeoutSec = 300
+	maxTimeoutSec         = 900
+)
+
+// Timeout returns the agent process timeout for a run mode. Mock runs use
+// timeout_sec; real runs use timeout_sec_real and default to a longer budget
+// because a model call takes far more than a scripted response.
+func (t Task) Timeout(mode Mode) time.Duration {
 	sec := t.TimeoutSec
-	if sec <= 0 {
-		sec = 90
+	if mode == ModeReal {
+		sec = t.TimeoutSecReal
+		if sec <= 0 {
+			sec = defaultRealTimeoutSec
+		}
+	} else if sec <= 0 {
+		sec = defaultTimeoutSec
 	}
 	return time.Duration(sec) * time.Second
 }

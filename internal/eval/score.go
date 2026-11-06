@@ -148,13 +148,13 @@ func Observe(events []agent.Event) Observation {
 
 // checkTask applies every hard assertion and budget. The returned warnings are
 // non-fatal budget/baseline nudges unless the task marks its budget strict.
-func checkTask(task Task, obs Observation, verifier *VerifierResult, workspace string, durationMS int64, exitCode int, timedOut bool) (failures, warnings []string) {
+func checkTask(task Task, obs Observation, verifier *VerifierResult, workspace string, durationMS int64, exitCode int, timedOut bool, mode Mode) (failures, warnings []string) {
 	wantExit := 0
 	if task.Expect.ExitCode != nil {
 		wantExit = *task.Expect.ExitCode
 	}
 	if timedOut {
-		failures = append(failures, fmt.Sprintf("run timed out after %s", task.Timeout()))
+		failures = append(failures, fmt.Sprintf("run timed out after %s", task.Timeout(mode)))
 	} else if exitCode != wantExit {
 		failures = append(failures, fmt.Sprintf("exit code %d, want %d", exitCode, wantExit))
 	}
@@ -306,32 +306,33 @@ func checkTask(task Task, obs Observation, verifier *VerifierResult, workspace s
 		}
 	}
 
-	// Budgets.
+	// Budgets. Real runs use the task's relaxed real thresholds when present.
+	budget := task.Budget.ForMode(mode)
 	type budgetCheck struct {
 		label string
 		got   string
 		over  bool
 	}
 	checks := []budgetCheck{
-		{"model calls", fmt.Sprint(obs.ModelCalls), task.Budget.MaxModelCalls > 0 && obs.ModelCalls > task.Budget.MaxModelCalls},
-		{"tool calls", fmt.Sprint(obs.ToolCalls), task.Budget.MaxToolCalls > 0 && obs.ToolCalls > task.Budget.MaxToolCalls},
-		{"tokens", fmt.Sprint(obs.Usage.TotalTokens), task.Budget.MaxTotalTokens > 0 && obs.Usage.TotalTokens > task.Budget.MaxTotalTokens},
-		{"cost", fmt.Sprintf("$%.6f", obs.CostUSD), task.Budget.MaxCostUSD > 0 && obs.CostUSD > task.Budget.MaxCostUSD},
-		{"duration", fmt.Sprintf("%dms", durationMS), task.Budget.MaxDurationMS > 0 && durationMS > task.Budget.MaxDurationMS},
+		{"model calls", fmt.Sprint(obs.ModelCalls), budget.MaxModelCalls > 0 && obs.ModelCalls > budget.MaxModelCalls},
+		{"tool calls", fmt.Sprint(obs.ToolCalls), budget.MaxToolCalls > 0 && obs.ToolCalls > budget.MaxToolCalls},
+		{"tokens", fmt.Sprint(obs.Usage.TotalTokens), budget.MaxTotalTokens > 0 && obs.Usage.TotalTokens > budget.MaxTotalTokens},
+		{"cost", fmt.Sprintf("$%.6f", obs.CostUSD), budget.MaxCostUSD > 0 && obs.CostUSD > budget.MaxCostUSD},
+		{"duration", fmt.Sprintf("%dms", durationMS), budget.MaxDurationMS > 0 && durationMS > budget.MaxDurationMS},
 	}
 	limits := map[string]string{
-		"model calls": fmt.Sprint(task.Budget.MaxModelCalls),
-		"tool calls":  fmt.Sprint(task.Budget.MaxToolCalls),
-		"tokens":      fmt.Sprint(task.Budget.MaxTotalTokens),
-		"cost":        fmt.Sprintf("$%.6f", task.Budget.MaxCostUSD),
-		"duration":    fmt.Sprintf("%dms", task.Budget.MaxDurationMS),
+		"model calls": fmt.Sprint(budget.MaxModelCalls),
+		"tool calls":  fmt.Sprint(budget.MaxToolCalls),
+		"tokens":      fmt.Sprint(budget.MaxTotalTokens),
+		"cost":        fmt.Sprintf("$%.6f", budget.MaxCostUSD),
+		"duration":    fmt.Sprintf("%dms", budget.MaxDurationMS),
 	}
 	for _, check := range checks {
 		if !check.over {
 			continue
 		}
 		msg := fmt.Sprintf("budget: %s %s exceeds %s", check.label, check.got, limits[check.label])
-		if task.Budget.Strict {
+		if budget.Strict {
 			failures = append(failures, msg)
 		} else {
 			warnings = append(warnings, msg)
