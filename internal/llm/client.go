@@ -243,7 +243,7 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, onDelta func(Delta
 			return nil, apiErr
 		}
 
-		return c.parseStream(ctx, httpResp.Body, onDelta)
+		return c.parseStream(ctx, httpResp.Body, onDelta, req.Tools)
 	}
 	if lastErr != nil {
 		return nil, lastErr
@@ -340,7 +340,7 @@ type partialCall struct {
 	args strings.Builder
 }
 
-func (c *Client) parseStream(ctx context.Context, body io.ReadCloser, onDelta func(Delta) error) (*Response, error) {
+func (c *Client) parseStream(ctx context.Context, body io.ReadCloser, onDelta func(Delta) error, tools []Tool) (*Response, error) {
 	defer body.Close()
 	resp := &Response{}
 	var text, reasoning strings.Builder
@@ -445,10 +445,149 @@ func (c *Client) parseStream(ctx context.Context, body io.ReadCloser, onDelta fu
 	resp.Message.Role = "assistant"
 	resp.Message.Content = text.String()
 	resp.Message.Reasoning = reasoning.String()
+	if len(resp.Message.ToolCalls) == 0 {
+		if calls, leftover, ok := recoverTextToolCalls(resp.Message.Content, tools); ok {
+			resp.Message.ToolCalls = calls
+			resp.Message.Content = leftover
+			resp.FinishReason = "tool_calls"
+		}
+	}
 	if resp.FinishReason == "" && len(resp.Message.ToolCalls) > 0 {
 		resp.FinishReason = "tool_calls"
 	}
 	return resp, nil
+}
+
+type textToolCall struct {
+	Name       string          `json:"name"`
+	Arguments  json.RawMessage `json:"arguments"`
+	Parameters json.RawMessage `json:"parameters"`
+}
+
+// recoverTextToolCalls turns tool calls a model wrote into the message body as
+// JSON text into structured calls. Some local models omit the wrapper tags
+// that Ollama's parser requires and return the payload as plain content, often
+// as several objects followed by a prose summary. Calls are only recovered when
+// every function name matches an offered tool.
+func recoverTextToolCalls(content string, tools []Tool) ([]ToolCall, string, bool) {
+	if len(tools) == 0 {
+		return nil, content, false
+	}
+	known := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		if tool.Function.Name != "" {
+			known[tool.Function.Name] = true
+		}
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil, content, false
+	}
+
+	var rawCalls []textToolCall
+	var leftover strings.Builder
+	remaining := trimmed
+	for i := 0; i < len(remaining); {
+		if remaining[i] != '{' && remaining[i] != '[' {
+			i++
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(remaining[i:]))
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			i++
+			continue
+		}
+		parsed, ok := parseTextToolCallPayload(value)
+		if !ok {
+			i++
+			continue
+		}
+		leftover.WriteString(remaining[:i])
+		remaining = remaining[i+int(dec.InputOffset()):]
+		rawCalls = append(rawCalls, parsed...)
+		i = 0
+	}
+	leftover.WriteString(remaining)
+	if len(rawCalls) == 0 {
+		return nil, content, false
+	}
+
+	calls := make([]ToolCall, 0, len(rawCalls))
+	for i, raw := range rawCalls {
+		name := strings.TrimSpace(raw.Name)
+		if !known[name] {
+			return nil, content, false
+		}
+		args, ok := textToolArguments(raw)
+		if !ok {
+			return nil, content, false
+		}
+		calls = append(calls, ToolCall{
+			ID:   fmt.Sprintf("call_text_%d", i),
+			Type: "function",
+			Function: FunctionCall{
+				Name:      name,
+				Arguments: args,
+			},
+		})
+	}
+	return calls, cleanRecoveredText(leftover.String()), true
+}
+
+func parseTextToolCallPayload(raw json.RawMessage) ([]textToolCall, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, false
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var list []textToolCall
+		if err := json.Unmarshal([]byte(trimmed), &list); err != nil || len(list) == 0 {
+			return nil, false
+		}
+		return list, true
+	}
+	var call textToolCall
+	if err := json.Unmarshal([]byte(trimmed), &call); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(call.Name) == "" {
+		return nil, false
+	}
+	return []textToolCall{call}, true
+}
+
+func cleanRecoveredText(raw string) string {
+	raw = strings.ReplaceAll(raw, "<tool_call>", "")
+	raw = strings.ReplaceAll(raw, "</tool_call>", "")
+	raw = strings.ReplaceAll(raw, "```json", "")
+	raw = strings.ReplaceAll(raw, "```", "")
+	return strings.TrimSpace(raw)
+}
+
+func textToolArguments(raw textToolCall) (string, bool) {
+	value := raw.Arguments
+	if trimmed := strings.TrimSpace(string(value)); trimmed == "" || trimmed == "null" {
+		value = raw.Parameters
+	}
+	trimmed := strings.TrimSpace(string(value))
+	if trimmed == "" || trimmed == "null" {
+		return "{}", true
+	}
+	if strings.HasPrefix(trimmed, "\"") {
+		var decoded string
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return "", false
+		}
+		trimmed = strings.TrimSpace(decoded)
+		if trimmed == "" {
+			return "{}", true
+		}
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return "", false
+	}
+	return trimmed, true
 }
 
 // Complete performs a non-streaming completion. Used for compaction and other
@@ -525,6 +664,13 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (*Response, erro
 		}
 		if ch.FinishReason != nil {
 			resp.FinishReason = *ch.FinishReason
+		}
+		if len(resp.Message.ToolCalls) == 0 {
+			if calls, leftover, ok := recoverTextToolCalls(resp.Message.Content, req.Tools); ok {
+				resp.Message.ToolCalls = calls
+				resp.Message.Content = leftover
+				resp.FinishReason = "tool_calls"
+			}
 		}
 		return resp, nil
 	}
