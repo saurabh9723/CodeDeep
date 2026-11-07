@@ -537,15 +537,18 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, sess *session.
 		a.runPostHooks(ctx, tc, raw, sess, "Error: "+runErr.Error(), true)
 		return finish(prefix.String()+"Error: "+runErr.Error(), true)
 	}
-	if result.Change != nil {
-		a.recordChange(result.Change)
+	mutations := result.Mutations()
+	if len(mutations) > 0 {
+		a.recordChanges(mutations)
 	}
 
 	output := prefix.String() + result.Output
-	if result.Change != nil && a.diag.Enabled() {
-		outcomes := a.diag.RunAfterChange(ctx, result.Change.Path)
-		a.emitDiagnosticOutcomes(tc, sess, result.Change.Path, outcomes)
-		output += formatDiagnostics(outcomes)
+	if a.diag.Enabled() {
+		for _, ch := range mutations {
+			outcomes := a.diag.RunAfterChange(ctx, ch.Path)
+			a.emitDiagnosticOutcomes(tc, sess, ch.Path, outcomes)
+			output += formatDiagnostics(outcomes)
+		}
 	}
 	output += a.runPostHooks(ctx, tc, raw, sess, output, result.IsError)
 	return finish(output, result.IsError)
@@ -753,8 +756,8 @@ func (a *Agent) toolNames() string {
 	return strings.Join(names, ", ")
 }
 
-func (a *Agent) recordChange(ch *tools.Change) {
-	if ch == nil {
+func (a *Agent) recordChanges(chs []*tools.Change) {
+	if len(chs) == 0 {
 		return
 	}
 	a.markChanged()
@@ -764,26 +767,35 @@ func (a *Agent) recordChange(ch *tools.Change) {
 		a.locks.checkpoint.Unlock()
 		return
 	}
-	for _, f := range cp.Files {
-		if f.Path == ch.Path {
-			a.locks.checkpoint.Unlock()
-			return
-		}
-	}
 	size := 0
 	for _, f := range cp.Files {
 		size += len(f.Content)
 	}
-	if size+len(ch.Old) > maxCheckpointBytes {
-		a.locks.checkpoint.Unlock()
-		return
+	for _, ch := range chs {
+		if ch == nil {
+			continue
+		}
+		seen := false
+		for _, f := range cp.Files {
+			if f.Path == ch.Path {
+				seen = true
+				break
+			}
+		}
+		if seen {
+			continue
+		}
+		if size+len(ch.Old) > maxCheckpointBytes {
+			continue
+		}
+		cp.Files = append(cp.Files, session.FileSnapshot{
+			Path:    ch.Path,
+			Existed: ch.Existed,
+			Mode:    ch.Mode,
+			Content: ch.Old,
+		})
+		size += len(ch.Old)
 	}
-	cp.Files = append(cp.Files, session.FileSnapshot{
-		Path:    ch.Path,
-		Existed: ch.Existed,
-		Mode:    ch.Mode,
-		Content: ch.Old,
-	})
 	sess := a.session
 	a.locks.checkpoint.Unlock()
 	if sess != nil {

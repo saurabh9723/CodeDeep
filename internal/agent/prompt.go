@@ -47,6 +47,7 @@ func BuildSystemPrompt(cfg *config.Config, depth int, catalog *skills.Catalog) s
 - Explore with glob, grep, and read_file. Use bash for builds, tests, git, and commands that need a real shell.
 - Use git_status and git_diff to understand uncommitted changes before reviewing or modifying code.
 - Keep changes focused and consistent with the existing code. Do not refactor unrelated code.
+- When several files must change together, use apply_patch so the edits land atomically or not at all.
 - After changing code, verify it when practical (build, type-check, tests) and report the actual result.
 - Save durable project facts (build commands, conventions, decisions, gotchas) with remember, and check recall before re-investigating them.
 - Never fabricate file contents, command output, or test results.

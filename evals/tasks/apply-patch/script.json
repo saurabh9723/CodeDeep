@@ -1,0 +1,35 @@
+{
+  "steps": [
+    {
+      "reasoning": "The tests use Sum, but the package still defines Add. One atomic patch can rename the definition and both call sites together.",
+      "text": "Renaming Add to Sum in arith.go, label.go, and stats.go with one apply_patch call.",
+      "calls": [
+        {
+          "name": "apply_patch",
+          "args": {
+            "edits": [
+              {
+                "path": "arith.go",
+                "old_string": "func Add(a, b int) int {",
+                "new_string": "func Sum(a, b int) int {"
+              },
+              {
+                "path": "label.go",
+                "old_string": "Add(a, b)",
+                "new_string": "Sum(a, b)"
+              },
+              {
+                "path": "stats.go",
+                "old_string": "Add(a, b)",
+                "new_string": "Sum(a, b)"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Renamed Add to Sum in all three files with one atomic patch. The package should compile and the tests should pass."
+    }
+  ]
+}

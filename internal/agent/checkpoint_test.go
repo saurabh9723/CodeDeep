@@ -54,6 +54,67 @@ func TestCheckpointCapturesTurnDiff(t *testing.T) {
 	}
 }
 
+func TestCheckpointCapturesEveryFileInAtomicPatch(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{"a.txt": "a0\n", "b.txt": "b0\n", "c.txt": "c0\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client, _ := newFakeLLM(t, func(n int, w http.ResponseWriter) {
+		if n == 1 {
+			streamToolCall(w, "call_patch", "apply_patch",
+				`{"edits":[{"path":"a.txt","old_string":"a0","new_string":"a1"},`+
+					`{"path":"b.txt","old_string":"b0","new_string":"b1"},`+
+					`{"path":"c.txt","old_string":"c0","new_string":"c1"}]}`, 10, 6)
+			return
+		}
+		streamText(w, "Patched.", 12, 5)
+	})
+
+	cfg := testConfig(t)
+	cfg.WorkDir = root
+	fs := tools.NewFS(root, false)
+	a := newTier1Agent(t, cfg, client, coreRegistry(fs), nil, nil)
+	sess := a.sessions.New(cfg.Model, root)
+
+	if err := a.Run(context.Background(), sess, "patch all three"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for name, want := range map[string]string{"a.txt": "a1\n", "b.txt": "b1\n", "c.txt": "c1\n"} {
+		data, _ := os.ReadFile(filepath.Join(root, name))
+		if string(data) != want {
+			t.Errorf("%s = %q, want %q", name, data, want)
+		}
+	}
+	if len(sess.Checkpoints) != 1 {
+		t.Fatalf("checkpoints = %+v", sess.Checkpoints)
+	}
+	cp := sess.Checkpoints[0]
+	if len(cp.Files) != 3 {
+		t.Fatalf("checkpoint files = %d, want 3: %+v", len(cp.Files), cp.Files)
+	}
+	for _, want := range []string{"a.txt", "b.txt", "c.txt", "-a0", "+a1", "-c0", "+c1"} {
+		if !strings.Contains(cp.Diff, want) {
+			t.Errorf("checkpoint diff missing %q:\n%s", want, cp.Diff)
+		}
+	}
+
+	restored, err := a.UndoAt(sess, 0)
+	if err != nil {
+		t.Fatalf("UndoAt: %v", err)
+	}
+	if len(restored) != 3 {
+		t.Errorf("restored = %v, want 3 files", restored)
+	}
+	for name, want := range map[string]string{"a.txt": "a0\n", "b.txt": "b0\n", "c.txt": "c0\n"} {
+		data, _ := os.ReadFile(filepath.Join(root, name))
+		if string(data) != want {
+			t.Errorf("after undo %s = %q, want %q", name, data, want)
+		}
+	}
+}
+
 func TestCheckpointDiffCoversCreatedFile(t *testing.T) {
 	root := t.TempDir()
 	client, _ := newFakeLLM(t, func(n int, w http.ResponseWriter) {

@@ -12,17 +12,18 @@ the browser.
 
 - **Agent loop** — streams model text and reasoning, executes tool calls, asks
   for approval, feeds results back, and repeats until the task is done.
-- **Coding tools** — `read_file`, `write_file`, `edit_file`, `glob`, `grep`,
-  `bash`, and `agent` for subagents.
+- **Coding tools** — `read_file`, `write_file`, `edit_file`, `apply_patch`
+  (atomic multi-file edits), `glob`, `grep`, `bash`, and `agent` for subagents.
 - **Codebase index** — an incremental symbol index for Go, Python, JS/TS, Rust,
   Java, C#, Kotlin, Ruby, PHP, C/C++, Swift, Scala, Shell, Markdown, Lua, and
   Elixir. `repo_map` and `find_symbol` give the model a token-budgeted map of
   the workspace and exact declarations by name; a ranked map is also appended
   to the system prompt (configurable budget, on by default), and the web file
   palette searches symbols alongside files.
-- **Diff previews and undo** — `write_file` and `edit_file` show a unified diff
-  before they run, including in the approval prompt. Every turn snapshots the
-  files it touches and records the turn's unified diff, so `/undo` (or the web
+- **Diff previews and undo** — `write_file`, `edit_file`, and `apply_patch`
+  show a unified diff before they run, including in the approval prompt. Every
+  turn snapshots the files it touches and records the turn's unified diff, so
+  `/undo` (or the web
   undo button) restores the previous contents or removes files that were
   created, while `/checkpoints` and the web checkpoint panel review each turn's
   diff and roll back through any checkpoint.
@@ -674,6 +675,11 @@ Built-in tools:
 - `write_file` — create or overwrite a file, creating parent directories.
 - `edit_file` — exact-substring replacement with CRLF fallback; requires a
   unique match unless `replace_all` is set.
+- `apply_patch` — an ordered list of `edit_file`-style replacements across one
+  or more files, applied atomically: every edit is validated first, and if any
+  edit fails no file is written. Repeated hunks for the same file apply in
+  order, the approval prompt shows the combined diff, and one checkpoint
+  captures every touched file for undo.
 - `glob` — `*`, `?`, `[...]`, and `**` patterns.
 - `grep` — RE2 search with an optional file filter and case-insensitive mode.
 - `bash` — shell command with timeout and combined stdout/stderr; set
@@ -707,7 +713,7 @@ follows the approval mode:
   concrete plan for a later run.
 
 Each turn records a checkpoint of the pre-change contents of every file that
-`write_file` or `edit_file` touches (up to 1 MB per file), plus the unified diff
+`write_file`, `edit_file`, or `apply_patch` touches (up to 1 MB per file), plus the unified diff
 of the turn's changes. `/checkpoints` lists them with per-turn `+added/-removed`
 stats, `/checkpoint <n>` shows a checkpoint's diff, and `/undo` restores the
 most recent checkpoint (removing files that did not exist before the turn).
@@ -725,7 +731,11 @@ a mutating tool runs sequentially.
 
 `permissions` grant or deny tool calls without prompting. Each rule has a
 `tool` glob and an `action` of `allow` or `deny`; `command` and `path` are
-optional globs. When both are present, both must match.
+optional globs. When both are present, both must match. For `apply_patch`, a
+path rule is checked against every edit: a deny rule blocks the call if any
+path matches, and an allow rule covers the call only if every path matches.
+"Always allow" for `apply_patch` is narrowed to the exact set of files in that
+patch.
 
 ```json
 {

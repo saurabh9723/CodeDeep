@@ -1547,6 +1547,7 @@ function approvalAlwaysLabel(ev) {
   const args = parseMaybe(ev.args) || {};
   if (ev.name === 'bash' && args.command) return 'Always allow this command';
   if ((ev.name === 'write_file' || ev.name === 'edit_file') && args.path) return 'Always allow this file';
+  if (ev.name === 'apply_patch' && Array.isArray(args.edits) && args.edits.length) return 'Always allow these files';
   return 'Always allow ' + (ev.name || 'tool');
 }
 

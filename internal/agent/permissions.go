@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"codedeep/internal/approval"
@@ -12,23 +13,26 @@ import (
 )
 
 // evaluateRules returns the first definitive permission decision for a call.
-// A deny match short-circuits; otherwise any allow match permits the call.
+// A deny rule blocks when it matches any affected path; an allow rule permits
+// the call only when it matches every affected path, so a multi-file tool
+// cannot smuggle one protected file past a path-scoped grant.
 func (a *Agent) evaluateRules(tool string, raw json.RawMessage) (approval.Decision, bool) {
 	if a.cfg == nil || len(a.cfg.Permissions) == 0 {
 		return approval.Deny, false
 	}
 	command := argString(raw, "command")
-	target := argString(raw, "path")
+	targets := argPaths(raw)
 	allowed := false
 	for _, rule := range a.cfg.Permissions {
-		if !a.ruleMatches(rule, tool, command, target) {
-			continue
-		}
 		switch strings.ToLower(strings.TrimSpace(rule.Action)) {
 		case "deny":
-			return approval.Deny, true
+			if a.ruleMatchesAny(rule, tool, command, targets) {
+				return approval.Deny, true
+			}
 		case "allow":
-			allowed = true
+			if a.ruleMatchesAll(rule, tool, command, targets) {
+				allowed = true
+			}
 		}
 	}
 	if allowed {
@@ -37,7 +41,45 @@ func (a *Agent) evaluateRules(tool string, raw json.RawMessage) (approval.Decisi
 	return approval.Deny, false
 }
 
-func (a *Agent) ruleMatches(rule config.PermissionRule, tool, command, target string) bool {
+// ruleMatchesAny reports whether a rule covers at least one affected path.
+// Deny rules use this form so one protected file blocks the whole call.
+func (a *Agent) ruleMatchesAny(rule config.PermissionRule, tool, command string, targets []string) bool {
+	if !a.ruleBaseMatches(rule, tool, command) {
+		return false
+	}
+	if rule.Path == "" {
+		return true
+	}
+	for _, target := range targets {
+		if matchPathRule(a.cfg.WorkDir, rule.Path, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleMatchesAll reports whether a rule covers every affected path. Allow
+// rules use this form so a multi-file tool cannot touch a file the grant does
+// not cover.
+func (a *Agent) ruleMatchesAll(rule config.PermissionRule, tool, command string, targets []string) bool {
+	if !a.ruleBaseMatches(rule, tool, command) {
+		return false
+	}
+	if rule.Path == "" {
+		return true
+	}
+	if len(targets) == 0 {
+		return false
+	}
+	for _, target := range targets {
+		if !matchPathRule(a.cfg.WorkDir, rule.Path, target) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *Agent) ruleBaseMatches(rule config.PermissionRule, tool, command string) bool {
 	if strings.TrimSpace(rule.Tool) == "" {
 		return false
 	}
@@ -46,11 +88,6 @@ func (a *Agent) ruleMatches(rule config.PermissionRule, tool, command, target st
 	}
 	if rule.Command != "" {
 		if command == "" || !globMatch(rule.Command, command) {
-			return false
-		}
-	}
-	if rule.Path != "" {
-		if target == "" || !matchPathRule(a.cfg.WorkDir, rule.Path, target) {
 			return false
 		}
 	}
@@ -122,8 +159,37 @@ func allowKey(name, args string) string {
 		if p := argString(raw, "path"); p != "" {
 			return name + "\x00path\x00" + p
 		}
+	case "apply_patch":
+		if paths := argPaths(raw); len(paths) > 0 {
+			sort.Strings(paths)
+			return name + "\x00paths\x00" + strings.Join(paths, "\x00")
+		}
 	}
 	return name
+}
+
+// argPaths collects every path a tool call can touch: the single "path"
+// argument plus the paths of apply_patch edits.
+func argPaths(raw json.RawMessage) []string {
+	var args struct {
+		Path  string `json:"path"`
+		Edits []struct {
+			Path string `json:"path"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil
+	}
+	var out []string
+	if strings.TrimSpace(args.Path) != "" {
+		out = append(out, args.Path)
+	}
+	for _, edit := range args.Edits {
+		if strings.TrimSpace(edit.Path) != "" {
+			out = append(out, edit.Path)
+		}
+	}
+	return out
 }
 
 func argString(raw json.RawMessage, key string) string {

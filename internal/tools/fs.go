@@ -286,15 +286,16 @@ type editArgs struct {
 }
 
 type editMatch struct {
-	oldText string
-	newText string
 	count   int
 	line    int
 	updated string
 }
 
-func matchEdit(content string, a editArgs, rel string) (editMatch, error) {
-	oldText, newText := a.OldString, a.NewString
+// replaceText applies an exact-substring replacement and falls back to CRLF
+// matching when the model emits LF but the file uses CRLF. It returns the
+// updated content, the number of matches, and the 1-based line of the first
+// match.
+func replaceText(content, oldText, newText string, replaceAll bool, rel string) (string, int, int, error) {
 	count := strings.Count(content, oldText)
 	if count == 0 && strings.Contains(content, "\r\n") {
 		// The model usually emits LF; the file may use CRLF.
@@ -308,18 +309,24 @@ func matchEdit(content string, a editArgs, rel string) (editMatch, error) {
 		}
 	}
 	if count == 0 {
-		return editMatch{}, fmt.Errorf("edit_file: old_string was not found in %s. Re-read the file and match the exact text including indentation", rel)
+		return "", 0, 0, fmt.Errorf("old_string was not found in %s. Re-read the file and match the exact text including indentation", rel)
 	}
-	if count > 1 && !a.ReplaceAll {
-		return editMatch{}, fmt.Errorf("edit_file: old_string appears %d times in %s. Add surrounding context or set replace_all=true", count, rel)
+	if count > 1 && !replaceAll {
+		return "", 0, 0, fmt.Errorf("old_string appears %d times in %s. Add surrounding context or set replace_all=true", count, rel)
 	}
 	line := 1 + strings.Count(content[:strings.Index(content, oldText)], "\n")
+	return strings.ReplaceAll(content, oldText, newText), count, line, nil
+}
+
+func matchEdit(content string, a editArgs, rel string) (editMatch, error) {
+	updated, count, line, err := replaceText(content, a.OldString, a.NewString, a.ReplaceAll, rel)
+	if err != nil {
+		return editMatch{}, fmt.Errorf("edit_file: %w", err)
+	}
 	return editMatch{
-		oldText: oldText,
-		newText: newText,
 		count:   count,
 		line:    line,
-		updated: strings.ReplaceAll(content, oldText, newText),
+		updated: updated,
 	}, nil
 }
 

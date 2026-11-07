@@ -17,6 +17,20 @@ type Result struct {
 	// can describe it without re-reading the file. The agent uses it to build
 	// undo checkpoints.
 	Change *Change
+	// Changes carries every mutation from a multi-file tool. When set it takes
+	// precedence over Change.
+	Changes []*Change
+}
+
+// Mutations returns the file mutations a result performed, if any.
+func (r Result) Mutations() []*Change {
+	if len(r.Changes) > 0 {
+		return r.Changes
+	}
+	if r.Change != nil {
+		return []*Change{r.Change}
+	}
+	return nil
 }
 
 // Change records the state of a file before and after a mutation.

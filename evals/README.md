@@ -81,6 +81,8 @@ The checked-in suite lives in `evals/tasks`. Each directory is one task.
 - `go-bug-fix` — read, patch, and prove a Go bug fix with `go test ./...`
 - `multi-file-edit` — rename a function at its definition and in both call
   sites, then prove the package with `go test ./...`
+- `apply-patch` — rename a function across three files in one atomic
+  `apply_patch` call, then prove the package with `go test ./...`
 - `mcp-echo` — start an MCP stdio server from the task's own `mcp_servers`
   config, call `mcp__mock__echo`, and use the returned text
 - `hook-audit` — pre/post tool hooks fire for the matching tool and record

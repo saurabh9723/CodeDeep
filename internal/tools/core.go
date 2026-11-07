@@ -54,6 +54,32 @@ func RegisterCoreWithJobs(r *Registry, f *FS, shell string, bg BackgroundStarter
 	})
 
 	r.Register(&Spec{
+		Name: "apply_patch",
+		Description: "Apply an ordered set of exact-substring edits across one or more files atomically. " +
+			"Every edit is validated against the original contents first; if any edit fails, no file is written. " +
+			"Use this instead of several edit_file calls when the changes must land together, such as a rename " +
+			"across a definition and its call sites. Repeated hunks for the same file apply in order.",
+		Params: Object(map[string]any{
+			"edits": map[string]any{
+				"type":        "array",
+				"description": "Edits to apply, in order. Each edit replaces old_string with new_string.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":        StrProp("Path of the file to edit."),
+						"old_string":  StrProp("Exact text to find, including indentation."),
+						"new_string":  StrProp("Replacement text."),
+						"replace_all": BoolProp("Replace every occurrence instead of requiring a unique match."),
+					},
+					"required": []string{"path", "old_string", "new_string"},
+				},
+			},
+		}, "edits"),
+		Preview: f.previewPatch,
+		Run:     f.applyPatch,
+	})
+
+	r.Register(&Spec{
 		Name: "glob",
 		Description: "Find files by glob pattern. Supports *, ?, [...] and ** (recursive). " +
 			"Examples: '**/*.go', 'src/**/*.ts'. Returns workspace-relative paths, sorted.",
