@@ -1,0 +1,19 @@
+{
+  "steps": [
+    {
+      "reasoning": "The mock MCP server exposes an echo tool, so I will call it with the requested text.",
+      "text": "Calling the MCP echo tool.",
+      "calls": [
+        {
+          "name": "mcp__mock__echo",
+          "args": {
+            "text": "mcp-hello"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The MCP echo tool returned: echo: mcp-hello"
+    }
+  ]
+}

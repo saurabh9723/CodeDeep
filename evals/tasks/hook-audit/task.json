@@ -1,0 +1,67 @@
+{
+  "name": "hook-audit",
+  "description": "Pre/post tool hooks fire only for the matching tool and record their audit trail in the workspace.",
+  "tags": ["capability", "hooks"],
+  "prompt": "Read hello.txt and report what it contains. This workspace records read_file calls with pre and post tool hooks.",
+  "mock": {
+    "script": "script.json"
+  },
+  "config": {
+    "hooks": {
+      "pre_tool": [
+        {
+          "command": "echo pre >> hook.log",
+          "timeout_sec": 5,
+          "tools": ["read_file"]
+        }
+      ],
+      "post_tool": [
+        {
+          "command": "echo post >> hook.log",
+          "timeout_sec": 5,
+          "tools": ["read_file"]
+        }
+      ]
+    }
+  },
+  "expect": {
+    "files": [
+      {
+        "path": "hello.txt",
+        "contains": "hook fixture"
+      },
+      {
+        "path": "hook.log",
+        "contains": "pre"
+      },
+      {
+        "path": "hook.log",
+        "contains": "post"
+      }
+    ],
+    "events": {
+      "min": {
+        "hook": 2
+      }
+    },
+    "tools": {
+      "required": ["read_file"],
+      "counts": {
+        "read_file": 1
+      },
+      "no_errors": true
+    },
+    "text_contains": ["hook fixture"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 1,
+    "strict": true,
+    "real": {
+      "max_model_calls": 4,
+      "max_tool_calls": 3,
+      "strict": true
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "background-job",
+  "description": "Start a shell command in the background, wait for it, and read its captured output with job_output.",
+  "tags": ["capability", "tools", "jobs"],
+  "prompt": "Start the shell command \"echo job-marker\" as a background job, wait briefly for it to finish, then read the job output and report it.",
+  "mock": {
+    "script": "script.json"
+  },
+  "expect": {
+    "tools": {
+      "required": ["bash", "job_output"],
+      "counts": {
+        "bash": 2,
+        "job_output": 1
+      },
+      "no_errors": true,
+      "output_contains": {
+        "bash": ["job-1"],
+        "job_output": ["job-marker"]
+      }
+    },
+    "text_contains": ["job-marker"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 4,
+    "max_tool_calls": 3,
+    "strict": true,
+    "real": {
+      "max_model_calls": 8,
+      "max_tool_calls": 6,
+      "strict": true
+    }
+  }
+}

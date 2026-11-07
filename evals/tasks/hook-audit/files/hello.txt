@@ -1,0 +1,1 @@
+hook fixture: read_file should trigger the configured audit hooks

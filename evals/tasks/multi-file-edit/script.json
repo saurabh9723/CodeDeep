@@ -1,0 +1,37 @@
+{
+  "steps": [
+    {
+      "reasoning": "The tests use Sum, but the package still defines Add. I will rename the definition and both call sites.",
+      "text": "Renaming Add to Sum in arith.go, label.go, and stats.go.",
+      "calls": [
+        {
+          "name": "edit_file",
+          "args": {
+            "path": "arith.go",
+            "old_string": "func Add(a, b int) int {",
+            "new_string": "func Sum(a, b int) int {"
+          }
+        },
+        {
+          "name": "edit_file",
+          "args": {
+            "path": "label.go",
+            "old_string": "Add(a, b)",
+            "new_string": "Sum(a, b)"
+          }
+        },
+        {
+          "name": "edit_file",
+          "args": {
+            "path": "stats.go",
+            "old_string": "Add(a, b)",
+            "new_string": "Sum(a, b)"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Renamed Add to Sum in all three files. The package should compile and the tests should pass."
+    }
+  ]
+}

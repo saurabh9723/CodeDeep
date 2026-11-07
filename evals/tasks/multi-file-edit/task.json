@@ -1,0 +1,54 @@
+{
+  "name": "multi-file-edit",
+  "description": "Rename a function across every file that references it, then prove the package builds with go test.",
+  "tags": ["coding", "go", "file", "verifier"],
+  "prompt": "The tests call Sum, but the package defines Add. Rename Add to Sum in every file that references it, then run the tests.",
+  "mock": {
+    "script": "script.json"
+  },
+  "verifier": "go test ./...",
+  "verifier_timeout_sec": 120,
+  "timeout_sec": 120,
+  "timeout_sec_real": 420,
+  "expect": {
+    "files": [
+      {
+        "path": "arith.go",
+        "contains": "func Sum(a, b int) int",
+        "not_contains": "func Add("
+      },
+      {
+        "path": "label.go",
+        "contains": "Sum(a, b)"
+      },
+      {
+        "path": "stats.go",
+        "contains": "Sum(a, b)"
+      },
+      {
+        "path": "arith_test.go",
+        "contains": "Sum(2, 3)"
+      }
+    ],
+    "tools": {
+      "required": ["edit_file"],
+      "counts": {
+        "edit_file": 3
+      },
+      "no_errors": true
+    },
+    "verifier_exit": 0,
+    "text_contains": ["Sum"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 3,
+    "strict": true,
+    "real": {
+      "max_model_calls": 10,
+      "max_tool_calls": 10,
+      "strict": true
+    }
+  }
+}

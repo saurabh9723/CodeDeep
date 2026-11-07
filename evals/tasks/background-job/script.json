@@ -1,0 +1,44 @@
+{
+  "steps": [
+    {
+      "reasoning": "The command is quick, but the task is to run it in the background and read its output.",
+      "text": "Starting the marker command as a background job.",
+      "calls": [
+        {
+          "name": "bash",
+          "args": {
+            "command": "echo job-marker",
+            "background": true
+          }
+        }
+      ]
+    },
+    {
+      "reasoning": "The job needs a moment to finish before its output is meaningful.",
+      "text": "Waiting briefly for the job to finish.",
+      "calls": [
+        {
+          "name": "bash",
+          "args": {
+            "command": "sleep 1"
+          }
+        }
+      ]
+    },
+    {
+      "reasoning": "Now I can read the captured output.",
+      "text": "Reading the job output.",
+      "calls": [
+        {
+          "name": "job_output",
+          "args": {
+            "id": "job-1"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The background job wrote job-marker and exited cleanly."
+    }
+  ]
+}

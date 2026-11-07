@@ -1,0 +1,19 @@
+{
+  "steps": [
+    {
+      "reasoning": "The user wants the file contents, so a single read is enough.",
+      "text": "Reading hello.txt.",
+      "calls": [
+        {
+          "name": "read_file",
+          "args": {
+            "path": "hello.txt"
+          }
+        }
+      ]
+    },
+    {
+      "text": "hello.txt contains the hook fixture line."
+    }
+  ]
+}

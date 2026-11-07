@@ -1,0 +1,43 @@
+{
+  "name": "mcp-echo",
+  "description": "Start an MCP stdio server from task config, call its echo tool, and use the returned text.",
+  "tags": ["capability", "mcp"],
+  "prompt": "Use the MCP tool named echo to echo the text \"mcp-hello\", then report the exact output it returned.",
+  "mock": {
+    "script": "script.json"
+  },
+  "timeout_sec": 120,
+  "config": {
+    "mcp_servers": {
+      "mock": {
+        "command": "go",
+        "args": ["run", "mcp_echo.go"],
+        "timeout_sec": 120
+      }
+    }
+  },
+  "expect": {
+    "tools": {
+      "required": ["mcp__mock__echo"],
+      "counts": {
+        "mcp__mock__echo": 1
+      },
+      "no_errors": true,
+      "output_contains": {
+        "mcp__mock__echo": ["echo: mcp-hello"]
+      }
+    },
+    "text_contains": ["echo: mcp-hello"],
+    "no_error_events": true
+  },
+  "budget": {
+    "max_model_calls": 2,
+    "max_tool_calls": 1,
+    "strict": true,
+    "real": {
+      "max_model_calls": 6,
+      "max_tool_calls": 4,
+      "strict": true
+    }
+  }
+}
