@@ -68,6 +68,7 @@ func (a *Agent) runSubagentTool(ctx context.Context, raw json.RawMessage) (tools
 		Approval:   a.approval,
 		Skills:     a.skills,
 		Memory:     a.mem,
+		Index:      a.idx,
 		Locks:      a.locks,
 	})
 	msgs := []llm.Message{{Role: "user", Content: args.Prompt}}

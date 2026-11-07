@@ -76,6 +76,15 @@ type Verify struct {
 	TimeoutSec int    `json:"timeout_sec,omitempty"`
 }
 
+// RepoMap configures the workspace symbol index. PromptTokens is the token
+// budget for the map injected into the system prompt; set it to 0 to disable
+// injection. The repo_map and find_symbol tools stay available either way.
+type RepoMap struct {
+	PromptTokens int `json:"prompt_tokens,omitempty"`
+	MaxFiles     int `json:"max_files,omitempty"`
+	RefreshSec   int `json:"refresh_sec,omitempty"`
+}
+
 type Config struct {
 	Provider          string               `json:"provider"`
 	APIKey            string               `json:"api_key"`
@@ -105,6 +114,7 @@ type Config struct {
 	Diagnostics       []DiagnosticRule     `json:"diagnostics,omitempty"`
 	DiagnosticTimeout int                  `json:"diagnostic_timeout_sec,omitempty"`
 	Verify            Verify               `json:"verify,omitempty"`
+	RepoMap           RepoMap              `json:"repo_map,omitempty"`
 	WebToken          string               `json:"web_token,omitempty"`
 	WebInsecure       bool                 `json:"web_insecure,omitempty"`
 	Editor            *Editor              `json:"editor,omitempty"`
@@ -150,7 +160,12 @@ func Default() *Config {
 		TracesDir:     filepath.Join(home, ".codedeep", "traces"),
 		MaxSteps:      60,
 		WebAddr:       "127.0.0.1:7777",
-		MCPServers:    map[string]MCPServer{},
+		RepoMap: RepoMap{
+			PromptTokens: 1200,
+			MaxFiles:     5000,
+			RefreshSec:   2,
+		},
+		MCPServers: map[string]MCPServer{},
 		InstructionFiles: []string{
 			"AGENTS.md",
 			"CODEAGENT.md",
@@ -285,6 +300,15 @@ func (c *Config) applyEnv(vars env.Vars) {
 	if dir := strings.TrimSpace(vars.TracesDir); dir != "" {
 		c.TracesDir = dir
 	}
+	if vars.RepoMapTokens != nil {
+		c.RepoMap.PromptTokens = *vars.RepoMapTokens
+	}
+	if vars.RepoMapMaxFiles != nil {
+		c.RepoMap.MaxFiles = *vars.RepoMapMaxFiles
+	}
+	if vars.RepoMapRefreshSec != nil {
+		c.RepoMap.RefreshSec = *vars.RepoMapRefreshSec
+	}
 	if shell := strings.TrimSpace(vars.Shell); shell != "" {
 		c.Shell = shell
 	}
@@ -412,6 +436,27 @@ func (c *Config) normalize() {
 	}
 	if c.DiagnosticTimeout > 600 {
 		c.DiagnosticTimeout = 600
+	}
+	if c.RepoMap.PromptTokens < 0 {
+		c.RepoMap.PromptTokens = 0
+	}
+	if c.RepoMap.PromptTokens > 0 && c.RepoMap.PromptTokens < 200 {
+		c.RepoMap.PromptTokens = 200
+	}
+	if c.RepoMap.PromptTokens > 8000 {
+		c.RepoMap.PromptTokens = 8000
+	}
+	if c.RepoMap.MaxFiles <= 0 {
+		c.RepoMap.MaxFiles = 5000
+	}
+	if c.RepoMap.MaxFiles > 50000 {
+		c.RepoMap.MaxFiles = 50000
+	}
+	if c.RepoMap.RefreshSec <= 0 {
+		c.RepoMap.RefreshSec = 2
+	}
+	if c.RepoMap.RefreshSec > 300 {
+		c.RepoMap.RefreshSec = 300
 	}
 	c.WebToken = strings.TrimSpace(c.WebToken)
 	if c.Editor != nil {

@@ -20,18 +20,7 @@ import (
 
 var errStopWalk = errors.New("stop walk")
 
-var ignoredDirs = map[string]bool{
-	".git": true, ".hg": true, ".svn": true,
-	"node_modules": true, "bower_components": true, "vendor": true,
-	"dist": true, "build": true, "target": true, "out": true,
-	".next": true, ".nuxt": true, ".svelte-kit": true,
-	".cache": true, "coverage": true,
-	"__pycache__": true, ".pytest_cache": true, ".mypy_cache": true,
-	".venv": true, "venv": true, "env": true,
-	".idea": true, ".gradle": true,
-}
-
-func shouldSkipDir(name string) bool { return ignoredDirs[name] }
+func shouldSkipDir(name string) bool { return util.IgnoredDir(name) }
 
 // Match implements glob matching with ** support. Both pattern and name use
 // forward slashes and are relative.

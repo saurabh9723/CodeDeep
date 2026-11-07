@@ -51,6 +51,9 @@ type Vars struct {
 	Approval          string   `env:"CODEAGENT_APPROVAL"`
 	SessionsDir       string   `env:"CODEAGENT_SESSIONS_DIR"`
 	TracesDir         string   `env:"CODEAGENT_TRACES_DIR"`
+	RepoMapTokens     *int     `env:"CODEAGENT_REPO_MAP_TOKENS"`
+	RepoMapMaxFiles   *int     `env:"CODEAGENT_REPO_MAP_MAX_FILES"`
+	RepoMapRefreshSec *int     `env:"CODEAGENT_REPO_MAP_REFRESH_SEC"`
 	Shell             string   `env:"CODEAGENT_SHELL"`
 	MaxSteps          *int     `env:"CODEAGENT_MAX_STEPS"`
 	WebAddr           string   `env:"CODEAGENT_WEB_ADDR"`

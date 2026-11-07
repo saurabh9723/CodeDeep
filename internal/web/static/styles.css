@@ -1144,6 +1144,15 @@ kbd {
   text-align: left;
 }
 .palette-row:hover, .palette-row.selected { background: var(--panel-2); color: var(--text); }
+.palette-group {
+  padding: 8px 9px 3px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.palette-symbol .palette-icon { color: var(--accent); }
 .palette-icon { width: 14px; flex: none; text-align: center; color: var(--faint); font-size: 11px; }
 .palette-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-desc { flex: none; color: var(--faint); font-size: 11px; }

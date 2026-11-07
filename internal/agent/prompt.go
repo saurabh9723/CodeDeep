@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"codedeep/internal/config"
+	"codedeep/internal/llm"
 	"codedeep/internal/session"
 	"codedeep/internal/skills"
 	"codedeep/internal/tools"
@@ -146,6 +147,28 @@ func loadProjectInstructions(cfg *config.Config) string {
 		fmt.Fprintf(&b, "### %s\n%s\n\n", it.path, it.body)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// latestUserQuery returns the most recent user text so the codebase map can
+// rank relevant files. Subagents keep their task in the live message list.
+func latestUserQuery(msgs []llm.Message, sess *session.Session) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			if text := strings.TrimSpace(msgs[i].Content); text != "" {
+				return text
+			}
+		}
+	}
+	if sess != nil {
+		for i := len(sess.Messages) - 1; i >= 0; i-- {
+			if sess.Messages[i].Role == "user" {
+				if text := strings.TrimSpace(sess.Messages[i].Content); text != "" {
+					return text
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // PlanSection renders the session's todo list for the system prompt.

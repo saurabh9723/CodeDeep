@@ -20,6 +20,7 @@ import (
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
 	"codedeep/internal/env"
+	"codedeep/internal/index"
 	"codedeep/internal/jobs"
 	"codedeep/internal/llm"
 	"codedeep/internal/memory"
@@ -50,6 +51,8 @@ func dispatch(args []string) int {
 			return cmdOpen(args[1:])
 		case "eval":
 			return cmdEval(args[1:])
+		case "index":
+			return cmdIndex(args[1:])
 		case "version", "--version", "-version", "-v":
 			fmt.Println(versionString())
 			return 0
@@ -83,6 +86,8 @@ Usage:
   codedeep stats               token, cost, cache, and tool activity
   codedeep stats -days 7 -workspace -json
   codedeep open src/main.go:42 open a file in your editor
+  codedeep index               show the codebase symbol map
+  codedeep index -q Resolve    search declarations by name
   codedeep eval                run the evaluation harness (mock by default)
   codedeep eval -list          list evaluation tasks
   codedeep eval -mode real -model deepseek-chat
@@ -138,6 +143,7 @@ Environment:
   DEEPSEEK_BASE_URL  API base URL (default https://api.deepseek.com)
   CODEAGENT_MODEL    model name
   CODEAGENT_CONFIG   config file path
+  CODEAGENT_REPO_MAP_TOKENS  system prompt map budget (0 disables)
 
 Tips:
   In the REPL, type /help for commands. End a line with a backslash to continue it.
@@ -546,11 +552,22 @@ func cmdDoctor(args []string) int {
 	fmt.Printf("memory         %d notes\n", len(mem.List()))
 	fmt.Printf("activity       %s\n", doctorStats(cfg))
 
+	idx := index.New(cfg.WorkDir, index.Options{
+		MaxFiles:        cfg.RepoMap.MaxFiles,
+		RefreshInterval: time.Duration(cfg.RepoMap.RefreshSec) * time.Second,
+	})
+	if files, symbols, _, err := idx.Stats(); err != nil {
+		fmt.Printf("index          error: %v\n", err)
+	} else {
+		fmt.Printf("index          %d files, %d symbols (prompt budget %d tokens)\n", files, symbols, cfg.RepoMap.PromptTokens)
+	}
+
 	fsys := tools.NewFS(cfg.WorkDir, cfg.AllowOutside)
 	reg := tools.NewRegistry()
 	manager := jobs.NewManager(cfg.Shell, cfg.WorkDir)
 	tools.RegisterCoreWithJobs(reg, fsys, cfg.Shell, manager)
 	jobs.RegisterTools(reg, manager)
+	index.RegisterTools(reg, idx)
 	catalog := skills.Discover(cfg.WorkDir, cfg.Home)
 	catalog.RegisterTools(reg)
 	fmt.Printf("tools          %d built-in\n", len(reg.List()))
@@ -615,6 +632,142 @@ func cmdDoctor(args []string) int {
 			break
 		}
 		fmt.Printf("    %s\n", name)
+	}
+	return 0
+}
+
+func cmdIndex(args []string) int {
+	fs := flag.NewFlagSet("codedeep index", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var configPath, cwd, query, kind, pathPrefix string
+	var tokens, limit int
+	var jsonOut bool
+	fs.StringVar(&configPath, "config", "", "config file path")
+	fs.StringVar(&cwd, "cwd", "", "workspace directory")
+	fs.StringVar(&query, "q", "", "search declarations by name")
+	fs.StringVar(&kind, "kind", "", "filter declarations by kind")
+	fs.StringVar(&pathPrefix, "path", "", "restrict to a path prefix")
+	fs.IntVar(&tokens, "tokens", 0, "map token budget (default: config, otherwise 1200)")
+	fs.IntVar(&limit, "n", 40, "maximum declarations to print")
+	fs.BoolVar(&jsonOut, "json", false, "print JSON")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: codedeep index [-q name] [-kind kind] [-path dir] [-tokens N] [-n N] [-json] [-cwd DIR]
+
+Without -q it prints the token-budgeted repository map. With -q it searches
+declarations by name (exact, prefix, substring, and fuzzy).`)
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "codedeep:", err)
+		return 1
+	}
+	if cwd != "" {
+		abs, err := filepath.Abs(cwd)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "codedeep:", err)
+			return 1
+		}
+		if st, err := os.Stat(abs); err != nil || !st.IsDir() {
+			fmt.Fprintf(os.Stderr, "codedeep: workspace %s is not a directory\n", abs)
+			return 1
+		}
+		cfg.WorkDir = abs
+	}
+
+	idx := index.New(cfg.WorkDir, index.Options{
+		MaxFiles:        cfg.RepoMap.MaxFiles,
+		RefreshInterval: time.Duration(cfg.RepoMap.RefreshSec) * time.Second,
+	})
+	files, symbols, built, err := idx.Stats()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "codedeep:", err)
+		return 1
+	}
+
+	budget := tokens
+	if budget <= 0 {
+		budget = cfg.RepoMap.PromptTokens
+	}
+	if budget <= 0 {
+		budget = 1200
+	}
+
+	if jsonOut {
+		out := map[string]any{
+			"root":    cfg.WorkDir,
+			"files":   files,
+			"symbols": symbols,
+			"built":   built,
+		}
+		if query != "" {
+			found, err := idx.SearchSymbols(query, pathPrefix, kind, limit)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "codedeep:", err)
+				return 1
+			}
+			out["query"] = query
+			out["results"] = found
+		} else {
+			res, err := idx.Map(index.MapOptions{Path: pathPrefix, MaxTokens: budget})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "codedeep:", err)
+				return 1
+			}
+			out["map"] = res
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(out); err != nil {
+			fmt.Fprintln(os.Stderr, "codedeep:", err)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Printf("workspace      %s\n", cfg.WorkDir)
+	fmt.Printf("index          %d files, %d symbols\n", files, symbols)
+
+	if query == "" {
+		res, err := idx.Map(index.MapOptions{Path: pathPrefix, MaxTokens: budget})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "codedeep:", err)
+			return 1
+		}
+		if res.ShownFiles == 0 {
+			fmt.Println("\nno matching files")
+			return 0
+		}
+		fmt.Printf("map            %d files · %d symbols · ~%d tokens\n\n", res.ShownFiles, res.ShownSymbols, res.Tokens)
+		fmt.Println(res.Text)
+		return 0
+	}
+
+	found, err := idx.SearchSymbols(query, pathPrefix, kind, limit)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "codedeep:", err)
+		return 1
+	}
+	if len(found) == 0 {
+		fmt.Printf("\nno declarations matching %q\n", query)
+		return 0
+	}
+	fmt.Printf("matches        %d\n\n", len(found))
+	for _, sym := range found {
+		text := sym.Signature
+		if text == "" {
+			text = sym.Kind + " " + sym.Name
+		}
+		fmt.Printf("%s:%d  %s\n", sym.File, sym.Line, text)
+	}
+	if len(found) >= limit {
+		fmt.Printf("[showing %d results; refine -q, -kind, or -path]\n", limit)
 	}
 	return 0
 }

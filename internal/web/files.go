@@ -14,6 +14,7 @@ import (
 
 	"codedeep/internal/approval"
 	"codedeep/internal/editor"
+	"codedeep/internal/util"
 )
 
 type fileEntry struct {
@@ -21,17 +22,6 @@ type fileEntry struct {
 	Path string `json:"path"`
 	Dir  bool   `json:"dir"`
 	Size int64  `json:"size,omitempty"`
-}
-
-var ignoredFileDirs = map[string]bool{
-	".git": true, ".hg": true, ".svn": true,
-	"node_modules": true, "bower_components": true, "vendor": true,
-	"dist": true, "build": true, "target": true, "out": true,
-	".next": true, ".nuxt": true, ".svelte-kit": true,
-	".cache": true, "coverage": true,
-	"__pycache__": true, ".pytest_cache": true, ".mypy_cache": true,
-	".venv": true, "venv": true,
-	".idea": true, ".gradle": true,
 }
 
 // handleFiles lists one directory of the workspace for the file picker.
@@ -62,7 +52,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	out := make([]fileEntry, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() && ignoredFileDirs[name] {
+		if entry.IsDir() && util.IgnoredDir(name) {
 			continue
 		}
 		info, err := entry.Info()
@@ -112,7 +102,7 @@ func (s *Server) handleFileSearch(w http.ResponseWriter, r *http.Request) {
 			return fs.SkipAll
 		}
 		if d.IsDir() {
-			if p != root && ignoredFileDirs[d.Name()] {
+			if p != root && util.IgnoredDir(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil

@@ -696,7 +696,9 @@ function openFilePalette(mention) {
   state.files.mention = !!mention;
   state.files.path = '';
   $('#filePalette').hidden = false;
-  $('#filesHint').textContent = mention ? 'Click a file to insert @path' : 'Click a file to insert its path';
+  $('#filesHint').textContent = mention
+    ? 'Click a file or symbol to insert @path[:line]'
+    : 'Click a file or symbol to insert its path';
   $('#filesFilter').value = '';
   closeCommandPalette();
   loadFiles('');
@@ -741,15 +743,87 @@ function onFileFilter() {
 
 async function searchFiles(query) {
   const seq = ++state.files.seq;
+  const symbolsPromise = api(
+    '/api/index?q=' + encodeURIComponent(query) + '&limit=12'
+  ).catch(() => null);
   try {
     const entries = await api('/api/files/search?q=' + encodeURIComponent(query));
     if (seq !== state.files.seq) return;
+    const indexed = await symbolsPromise;
+    if (seq !== state.files.seq) return;
     $('#filesPath').textContent = '“' + truncate(query, 40) + '”';
     $('#filesUpBtn').disabled = true;
-    renderFileEntries(entries || [], true);
+    renderSearchResults(entries || [], (indexed && indexed.results) || []);
   } catch (err) {
     if (seq === state.files.seq) renderFileMessage('Search failed: ' + err.message);
   }
+}
+
+function renderSearchResults(files, symbols) {
+  const list = $('#filesList');
+  list.innerHTML = '';
+  if (!files.length && !symbols.length) {
+    list.append(el('div', 'palette-empty', 'No matching files or symbols.'));
+    return;
+  }
+  if (symbols.length) {
+    list.append(el('div', 'palette-group', 'Symbols · ' + symbols.length));
+    for (const sym of symbols) list.append(renderSymbolRow(sym));
+  }
+  if (files.length) {
+    if (symbols.length) list.append(el('div', 'palette-group', 'Files · ' + files.length));
+    for (const entry of files) list.append(renderFileRow(entry, true));
+  }
+}
+
+function symbolGlyph(kind) {
+  switch (kind) {
+    case 'struct':
+    case 'class':
+    case 'interface':
+    case 'type':
+    case 'enum':
+    case 'trait':
+      return '◇';
+    case 'const':
+    case 'var':
+      return '=';
+    case 'heading':
+      return '#';
+    case 'module':
+      return '▣';
+    default:
+      return 'ƒ';
+  }
+}
+
+function renderSymbolRow(sym) {
+  const ref = sym.file + ':' + sym.line;
+  const row = el('button', 'palette-row palette-symbol');
+  row.type = 'button';
+  row.title = (sym.signature || sym.name) + ' — ' + ref;
+  const label = sym.parent ? sym.name + ' · ' + sym.parent : sym.name;
+  row.append(
+    el('span', 'palette-icon', symbolGlyph(sym.kind)),
+    el('span', 'palette-name', label),
+    el('span', 'palette-desc', ref)
+  );
+  const open = el('span', 'palette-open', '↗');
+  open.title = 'Open in editor';
+  open.setAttribute('role', 'button');
+  open.setAttribute('tabindex', '0');
+  const launch = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openInEditor(sym.file, sym.line);
+  };
+  open.addEventListener('click', launch);
+  open.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') launch(e);
+  });
+  row.append(open);
+  row.addEventListener('click', () => insertFileMention(ref));
+  return row;
 }
 
 function renderFileMessage(text) {
@@ -765,37 +839,39 @@ function renderFileEntries(entries, searching) {
     list.append(el('div', 'palette-empty', searching ? 'No matching files.' : 'Empty directory.'));
     return;
   }
-  for (const entry of entries) {
-    const row = el('button', 'palette-row');
-    row.type = 'button';
-    row.title = entry.path;
-    row.append(
-      el('span', 'palette-icon', entry.dir && !searching ? '▸' : '·'),
-      el('span', 'palette-name', entry.name)
-    );
-    if (entry.dir && !searching) row.append(el('span', 'palette-desc', 'dir'));
-    else {
-      const open = el('span', 'palette-open', '↗');
-      open.title = 'Open in editor';
-      open.setAttribute('role', 'button');
-      open.setAttribute('tabindex', '0');
-      const launch = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openInEditor(entry.path);
-      };
-      open.addEventListener('click', launch);
-      open.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') launch(e);
-      });
-      row.append(open);
-    }
-    row.addEventListener('click', () => {
-      if (entry.dir && !searching) loadFiles(entry.path);
-      else insertFileMention(entry.path);
+  for (const entry of entries) list.append(renderFileRow(entry, searching));
+}
+
+function renderFileRow(entry, searching) {
+  const row = el('button', 'palette-row');
+  row.type = 'button';
+  row.title = entry.path;
+  row.append(
+    el('span', 'palette-icon', entry.dir && !searching ? '▸' : '·'),
+    el('span', 'palette-name', entry.name)
+  );
+  if (entry.dir && !searching) row.append(el('span', 'palette-desc', 'dir'));
+  else {
+    const open = el('span', 'palette-open', '↗');
+    open.title = 'Open in editor';
+    open.setAttribute('role', 'button');
+    open.setAttribute('tabindex', '0');
+    const launch = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openInEditor(entry.path);
+    };
+    open.addEventListener('click', launch);
+    open.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') launch(e);
     });
-    list.append(row);
+    row.append(open);
   }
+  row.addEventListener('click', () => {
+    if (entry.dir && !searching) loadFiles(entry.path);
+    else insertFileMention(entry.path);
+  });
+  return row;
 }
 
 function insertFileMention(path) {

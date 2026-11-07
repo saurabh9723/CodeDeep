@@ -33,6 +33,11 @@
     { "pattern": "*.go", "command": "go vet ./..." }
   ],
   "diagnostic_timeout_sec": 30,
+  "repo_map": {
+    "prompt_tokens": 1200,
+    "max_files": 5000,
+    "refresh_sec": 2
+  },
   "verify": {
     "command": "",
     "timeout_sec": 300

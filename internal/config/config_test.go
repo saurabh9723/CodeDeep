@@ -21,6 +21,7 @@ var configEnvVars = []string{
 	"CODEAGENT_PROMPT_CACHE",
 	"CODEAGENT_COMPACT_AT", "CODEAGENT_APPROVAL", "CODEAGENT_SESSIONS_DIR",
 	"CODEAGENT_TRACES_DIR",
+	"CODEAGENT_REPO_MAP_TOKENS", "CODEAGENT_REPO_MAP_MAX_FILES", "CODEAGENT_REPO_MAP_REFRESH_SEC",
 	"CODEAGENT_SHELL", "CODEAGENT_MAX_STEPS", "CODEAGENT_WEB_ADDR",
 	"CODEAGENT_DEBUG", "CODEAGENT_ALLOW_OUTSIDE",
 	"CODEAGENT_CONFIG", "CODEAGENT_MCP_CONFIG",
@@ -144,6 +145,44 @@ func TestEnvOverrides(t *testing.T) {
 	}
 	if !cfg.Debug || !cfg.AllowOutside {
 		t.Errorf("bool overrides = debug:%v outside:%v", cfg.Debug, cfg.AllowOutside)
+	}
+}
+
+func TestRepoMapDefaultsAndOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RepoMap.PromptTokens != 1200 || cfg.RepoMap.MaxFiles != 5000 || cfg.RepoMap.RefreshSec != 2 {
+		t.Fatalf("repo map defaults = %+v", cfg.RepoMap)
+	}
+
+	t.Setenv("CODEAGENT_REPO_MAP_TOKENS", "0")
+	t.Setenv("CODEAGENT_REPO_MAP_MAX_FILES", "900")
+	t.Setenv("CODEAGENT_REPO_MAP_REFRESH_SEC", "5")
+	cfg, err = Load(p)
+	if err != nil {
+		t.Fatalf("Load with overrides: %v", err)
+	}
+	if cfg.RepoMap.PromptTokens != 0 {
+		t.Fatalf("prompt budget should be disabled, got %d", cfg.RepoMap.PromptTokens)
+	}
+	if cfg.RepoMap.MaxFiles != 900 || cfg.RepoMap.RefreshSec != 5 {
+		t.Fatalf("repo map env overrides = %+v", cfg.RepoMap)
+	}
+
+	t.Setenv("CODEAGENT_REPO_MAP_TOKENS", "50")
+	cfg, err = Load(p)
+	if err != nil {
+		t.Fatalf("Load with clamped budget: %v", err)
+	}
+	if cfg.RepoMap.PromptTokens != 200 {
+		t.Fatalf("small budget should clamp to 200, got %d", cfg.RepoMap.PromptTokens)
 	}
 }
 

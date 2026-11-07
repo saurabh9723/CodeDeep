@@ -14,6 +14,12 @@ the browser.
   for approval, feeds results back, and repeats until the task is done.
 - **Coding tools** — `read_file`, `write_file`, `edit_file`, `glob`, `grep`,
   `bash`, and `agent` for subagents.
+- **Codebase index** — an incremental symbol index for Go, Python, JS/TS, Rust,
+  Java, C#, Kotlin, Ruby, PHP, C/C++, Swift, Scala, Shell, Markdown, Lua, and
+  Elixir. `repo_map` and `find_symbol` give the model a token-budgeted map of
+  the workspace and exact declarations by name; a ranked map is also appended
+  to the system prompt (configurable budget, on by default), and the web file
+  palette searches symbols alongside files.
 - **Diff previews and undo** — `write_file` and `edit_file` show a unified diff
   before they run, including in the approval prompt. Every turn snapshots the
   files it touches and records the turn's unified diff, so `/undo` (or the web
@@ -319,6 +325,7 @@ config file is fine. See [`config.example.json`](config.example.json).
     { "pattern": "*.go", "command": "go vet ./..." }
   ],
   "diagnostic_timeout_sec": 30,
+  "repo_map": { "prompt_tokens": 1200, "max_files": 5000, "refresh_sec": 2 },
   "verify": { "command": "go test ./...", "timeout_sec": 300 },
   "editor": { "command": "code", "args": ["-g", "{file}:{line}"] },
   "permissions": [
@@ -377,6 +384,9 @@ CODEAGENT_WEB_INSECURE=false
 CODEAGENT_DIAGNOSTIC_TIMEOUT=30
 CODEAGENT_ALLOW_OUTSIDE=false
 CODEAGENT_DEBUG=false
+CODEAGENT_REPO_MAP_TOKENS=1200       # 0 disables the system-prompt map
+CODEAGENT_REPO_MAP_MAX_FILES=5000
+CODEAGENT_REPO_MAP_REFRESH_SEC=2
 CODEAGENT_CONFIG=$HOME/.codedeep/config.json
 CODEAGENT_MCP_CONFIG=$HOME/.codedeep/mcp.json
 ```
@@ -569,6 +579,42 @@ Plans and memory are updated by internal tools that do not require approval and
 remain available in plan and read-only modes. They are still subject to explicit
 deny rules.
 
+### Repo map and symbol index
+
+CodeDeep keeps an in-memory index of the workspace so the model can orient
+itself without reading every file. It records files, languages, line counts, and
+declarations (functions, methods, types, classes, constants, and markdown
+headings) and refreshes incrementally when file size or mtime changes.
+
+The index is model-agnostic: nothing depends on the model's size or context
+window. Two tools expose it, and both stay available whatever the prompt budget:
+
+- `repo_map` — ranked files with their key declarations and line numbers,
+  budgeted by tokens. Pass `query` to rank for a task, `path` to limit a
+  subtree, and `max_tokens` (default 1200, maximum 8000).
+- `find_symbol` — exact, prefix, substring, and fuzzy name matching across
+  kinds; returns `path:line` with the declaration signature.
+
+A map section is appended to the end of the system prompt, ranked by the latest
+user request, so the stable prompt prefix stays cache-friendly. `prompt_tokens`
+sets its budget (default 1200; 0 disables injection). The index fails open: if
+the workspace cannot be read, the prompt is unchanged.
+
+```json
+{
+  "repo_map": { "prompt_tokens": 1200, "max_files": 5000, "refresh_sec": 2 }
+}
+```
+
+```bash
+codedeep index                    # print the token-budgeted map
+codedeep index -q Resolve         # search declarations by name
+codedeep index -q handler -kind func -path internal/web -n 20 -json
+```
+
+Environment overrides: `CODEAGENT_REPO_MAP_TOKENS`,
+`CODEAGENT_REPO_MAP_MAX_FILES`, and `CODEAGENT_REPO_MAP_REFRESH_SEC`.
+
 ### Background jobs
 
 Pass `background: true` to `bash` to start a long-running command without
@@ -626,12 +672,15 @@ Built-in tools:
 - `todo_write` — replace the session's persistent working plan.
 - `remember`, `recall`, `forget` — save, read, and delete durable project or
   global memory notes.
+- `repo_map` — token-budgeted map of files and declarations, ranked by query.
+- `find_symbol` — find functions, methods, types, and classes by name.
 - `use_skill` — load a workspace or global skill from `.codedeep/skills`.
 
 `glob` and `grep` skip `.git`, `node_modules`, `vendor`, `dist`, `build`,
 virtualenvs, caches, and other generated directories. The read-only tools
 (`read_file`, `glob`, `grep`, `git_status`, `git_diff`, `job_output`,
-`job_list`, `recall`, `use_skill`) never prompt. `todo_write`, `remember`, and
+`job_list`, `recall`, `repo_map`, `find_symbol`, `use_skill`) never prompt.
+`todo_write`, `remember`, and
 `forget` are internal state tools: they skip approval and stay available in
 read-only and plan modes, but explicit deny rules still apply. Everything else
 follows the approval mode:
@@ -747,7 +796,10 @@ stats, and the `/api/analytics` endpoint. Trace coverage includes store
 round-trip, pruning and unsafe-ID rejection, eval trace persistence, live
 session capture, and the trace list/get/delete API. Environment coverage
 includes typed parsing, provider alias precedence, `.env` loading, and
-malformed-value errors.
+malformed-value errors. Index coverage includes Go AST symbols, regex parsers
+for the other supported languages, ignored directories, noise and binary files,
+incremental refresh, fuzzy search, map ranking and budgets, prompt caching and
+invalidation, the `/api/index` endpoint, and system-prompt injection.
 
 The evaluation harness has its own tests for task discovery and strict schema
 validation, filter selection, config and environment isolation, scoring and
@@ -837,6 +889,7 @@ internal/diff     unified diff engine for previews
 internal/tools    registry plus file, search, shell, and git tools
 internal/mcp      stdio JSON-RPC client and tool registration
 internal/hooks    pre/post tool shell hooks
+internal/index    incremental symbol index, repo map ranking, and index tools
 internal/diagnostics post-edit build, vet, and lint commands
 internal/memory   durable project/global notes and the remember/recall/forget tools
 internal/analytics session aggregation for token/cost/cache/tool observability

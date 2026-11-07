@@ -271,7 +271,7 @@ func TestSystemPromptIncludesMemoryIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := New(Options{Config: cfg, Registry: tools.NewRegistry(), Memory: mem})
-	prompt := a.systemPrompt(nil)
+	prompt := a.systemPrompt(nil, nil)
 	if !strings.Contains(prompt, "# Project memory") || !strings.Contains(prompt, "build-command [project]") {
 		t.Errorf("prompt missing memory index:\n%s", prompt)
 	}

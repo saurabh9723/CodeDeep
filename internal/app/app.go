@@ -9,6 +9,7 @@ import (
 	"codedeep/internal/agent"
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
+	"codedeep/internal/index"
 	"codedeep/internal/jobs"
 	"codedeep/internal/llm"
 	"codedeep/internal/mcp"
@@ -27,6 +28,7 @@ type App struct {
 	Sessions *session.Store
 	Skills   *skills.Catalog
 	Memory   *memory.Store
+	Index    *index.Index
 	Jobs     *jobs.Manager
 	Logf     func(format string, args ...any)
 
@@ -48,6 +50,11 @@ func New(cfg *config.Config) (*App, error) {
 	manager := jobs.NewManager(cfg.Shell, cfg.WorkDir)
 	tools.RegisterCoreWithJobs(registry, fsys, cfg.Shell, manager)
 	jobs.RegisterTools(registry, manager)
+	idx := index.New(cfg.WorkDir, index.Options{
+		MaxFiles:        cfg.RepoMap.MaxFiles,
+		RefreshInterval: time.Duration(cfg.RepoMap.RefreshSec) * time.Second,
+	})
+	index.RegisterTools(registry, idx)
 	catalog := skills.Discover(cfg.WorkDir, cfg.Home)
 	catalog.RegisterTools(registry)
 	mem := memory.New(cfg.WorkDir, cfg.Home)
@@ -62,6 +69,7 @@ func New(cfg *config.Config) (*App, error) {
 		Sessions: store,
 		Skills:   catalog,
 		Memory:   mem,
+		Index:    idx,
 		Jobs:     manager,
 		Logf:     logf,
 	}
@@ -98,6 +106,7 @@ func (a *App) NewAgent(approver approval.Approver, emit agent.Emitter) *agent.Ag
 		Emitter:  emit,
 		Skills:   a.Skills,
 		Memory:   a.Memory,
+		Index:    a.Index,
 	})
 }
 

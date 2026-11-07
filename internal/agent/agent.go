@@ -17,6 +17,7 @@ import (
 	"codedeep/internal/diagnostics"
 	"codedeep/internal/diff"
 	"codedeep/internal/hooks"
+	"codedeep/internal/index"
 	"codedeep/internal/llm"
 	"codedeep/internal/memory"
 	"codedeep/internal/session"
@@ -61,6 +62,9 @@ type Options struct {
 	// recall/remember tools are still registered by the app but the prompt
 	// gets no memory index.
 	Memory *memory.Store
+	// Index is the shared codebase symbol index. It adds a query-ranked map to
+	// the system prompt; tools are registered separately by the app.
+	Index *index.Index
 	// Locks, when set, shares one lock set across the whole agent tree so
 	// parallel subagents cannot interleave events, approvals, checkpoint
 	// writes, or session saves. Subagents inherit their parent's locks.
@@ -95,6 +99,7 @@ type Agent struct {
 	diag      *diagnostics.Runner
 	skills    *skills.Catalog
 	mem       *memory.Store
+	idx       *index.Index
 	verifier  *verify.Runner
 	locks     *sharedLocks
 	depth     int
@@ -135,6 +140,7 @@ func New(opts Options) *Agent {
 		diag:       diagnostics.New(opts.Config, opts.Config.WorkDir),
 		skills:     opts.Skills,
 		mem:        opts.Memory,
+		idx:        opts.Index,
 		verifier:   verify.New(opts.Config, opts.Config.WorkDir),
 		locks:      locks,
 		depth:      depth,
@@ -161,13 +167,18 @@ func (a *Agent) emitEvent(ev Event) {
 
 // systemPrompt adds the session plan and durable memory index to the base
 // prompt so long tasks and earlier notes stay visible after compaction.
-func (a *Agent) systemPrompt(sess *session.Session) string {
+func (a *Agent) systemPrompt(sess *session.Session, msgs []llm.Message) string {
 	system := BuildSystemPrompt(a.cfg, a.depth, a.skills)
 	if sess != nil {
 		system += PlanSection(sess.Todos)
 	}
 	if a.mem != nil {
 		system += a.mem.PromptSection(8 << 10)
+	}
+	if a.idx != nil {
+		if section := a.idx.Prompt(latestUserQuery(msgs, sess), a.cfg.RepoMap.PromptTokens); section != "" {
+			system += "\n" + section
+		}
 	}
 	return system
 }
@@ -237,7 +248,7 @@ func (a *Agent) runLoop(ctx context.Context, msgs *[]llm.Message, sess *session.
 		}
 		// Rebuild the prompt each step so plan and memory updates made by tools
 		// are visible immediately and survive compaction within the same turn.
-		system := a.systemPrompt(a.session)
+		system := a.systemPrompt(a.session, *msgs)
 		a.maybeCompact(ctx, msgs, system, sess)
 
 		requestMsgs := make([]llm.Message, 0, len(*msgs)+1)
