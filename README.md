@@ -123,8 +123,17 @@ go build -o bin/codedeep.exe ./cmd/codedeep
 # macOS / Linux
 go build -o bin/codedeep ./cmd/codedeep
 
+# Option A: export the key in your shell
 export DEEPSEEK_API_KEY=sk-...        # PowerShell: $env:DEEPSEEK_API_KEY="sk-..."
+
+# Option B: keep it in a local .env (git-ignored)
+cp .env.example .env                  # then fill in DEEPSEEK_API_KEY
 ```
+
+CodeDeep reads `.env` from the current working directory before loading the
+config file. Real shell variables take precedence over `.env`, and `.env`
+takes precedence over `config.json`. Set `CODEAGENT_ENV_FILE` to load a
+different env file.
 
 ### One-shot
 
@@ -336,9 +345,15 @@ is split evenly across the tool calls it requested, so `/status`, the web
 header, and the finished-turn summary can show usage and cost by tool as well as
 per turn and per session. Prices change, so check your provider's current rates.
 
-Prefer environment variables over storing keys in files:
+Environment variables override the config file and are parsed through one
+typed schema in [`internal/env`](internal/env/env.go). A malformed numeric or
+boolean value fails fast with the variable name instead of being ignored.
+CodeDeep loads `.env` from the current working directory (or the path in
+`CODEAGENT_ENV_FILE`) before reading the config; exported shell variables win
+over `.env` values. Copy [`.env.example`](.env.example) to `.env` to get
+started.
 
-```bash
+```dotenv
 CODEAGENT_PROVIDER=openai        # openai, anthropic, gemini, or ollama
 DEEPSEEK_API_KEY=sk-...          # CODEAGENT_API_KEY and OPENAI_API_KEY also work
 ANTHROPIC_API_KEY=sk-ant-...     # when CODEAGENT_PROVIDER=anthropic
@@ -352,7 +367,10 @@ CODEAGENT_APPROVAL=ask
 CODEAGENT_CONTEXT_WINDOW=128000
 CODEAGENT_COMPACT_AT=0.8
 CODEAGENT_MAX_STEPS=60
+CODEAGENT_MAX_TOKENS=8192
+CODEAGENT_TEMPERATURE=0.3
 CODEAGENT_SESSIONS_DIR=$HOME/.codedeep/sessions
+CODEAGENT_TRACES_DIR=$HOME/.codedeep/traces
 CODEAGENT_WEB_ADDR=127.0.0.1:7777
 CODEAGENT_WEB_TOKEN=long-random-string
 CODEAGENT_WEB_INSECURE=false
@@ -362,6 +380,9 @@ CODEAGENT_DEBUG=false
 CODEAGENT_CONFIG=$HOME/.codedeep/config.json
 CODEAGENT_MCP_CONFIG=$HOME/.codedeep/mcp.json
 ```
+
+`CODEAGENT_ENV_FILE` must be exported in the shell; it selects the env file
+before that file is read.
 
 `work_dir` is always the CLI `-cwd` value or the current directory; it is not
 read from the config file.
@@ -724,7 +745,9 @@ daily bucketing, range and workspace filters, cache-hit math, per-model and
 per-tool aggregation, the hourly heatmap, legacy sessions without per-turn
 stats, and the `/api/analytics` endpoint. Trace coverage includes store
 round-trip, pruning and unsafe-ID rejection, eval trace persistence, live
-session capture, and the trace list/get/delete API.
+session capture, and the trace list/get/delete API. Environment coverage
+includes typed parsing, provider alias precedence, `.env` loading, and
+malformed-value errors.
 
 The evaluation harness has its own tests for task discovery and strict schema
 validation, filter selection, config and environment isolation, scoring and
@@ -755,11 +778,11 @@ go run ./cmd/codedeep eval -repeat 3 -jobs 4
 go run ./cmd/codedeep eval -baseline evals/baseline.json -fail-on-regression
 ```
 
-To measure a real model, switch mode and pass the provider/model (credentials
-stay in environment variables):
+To measure a real model, switch mode and pass the provider/model. Credentials
+come from the shell or the `.env` file:
 
 ```bash
-export DEEPSEEK_API_KEY="..."
+export DEEPSEEK_API_KEY="..."   # or DEEPSEEK_API_KEY=... in .env
 go run ./cmd/codedeep eval -mode real -provider openai -model deepseek-chat \
   -price-in 0.27 -price-out 1.10
 ```
@@ -805,6 +828,7 @@ cmd/codedeep      CLI, REPL, renderer, web launcher
 cmd/mockllm       deterministic OpenAI-compatible test provider
 cmd/mockmcp       deterministic stdio MCP server
 internal/app      wiring: config, client, registry, sessions, MCP
+internal/env      typed environment schema and .env loading for the whole app
 internal/agent    loop, compaction, subagents, system prompt, checkpoints, events
 internal/llm      provider interface, OpenAI-compatible and Anthropic/Gemini clients
 internal/mockllm  reusable scripted mock provider for tests and evals
@@ -844,7 +868,8 @@ and the web UI both consume the same events, so behavior stays consistent.
 - Hooks and diagnostics run shell commands you configure. Treat the config file
   as trusted input, and remember that hooks run with the same permissions as
   CodeDeep.
-- Keep API keys in environment variables, not in committed config files.
+- Keep API keys in environment variables or a git-ignored `.env`, not in
+  committed config files. `.gitignore` already excludes `.env` and `.env.*`.
 - The agent is instructed not to run destructive commands without explicit
   intent, but approval mode is the real guardrail.
 

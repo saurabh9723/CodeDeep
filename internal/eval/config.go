@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"codedeep/internal/env"
 )
 
 // Price is USD per million tokens used for harness cost accounting.
@@ -279,32 +281,24 @@ func removeKeys(env map[string]string, keys ...string) {
 // CheckRealCredentials fails early with actionable guidance instead of letting
 // every task fail with a provider 401.
 func CheckRealCredentials(provider string) error {
+	vars := env.Get()
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "ollama":
 		return nil
 	case "anthropic", "claude":
-		if envAny("ANTHROPIC_API_KEY", "CODEAGENT_API_KEY") == "" {
+		if vars.KeyFor("anthropic") == "" {
 			return fmt.Errorf("real Anthropic mode needs ANTHROPIC_API_KEY or CODEAGENT_API_KEY")
 		}
 	case "gemini", "google":
-		if envAny("GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEAGENT_API_KEY") == "" {
+		if vars.KeyFor("gemini") == "" {
 			return fmt.Errorf("real Gemini mode needs GEMINI_API_KEY, GOOGLE_API_KEY, or CODEAGENT_API_KEY")
 		}
 	default:
-		if envAny("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "CODEAGENT_API_KEY") == "" {
+		if vars.KeyFor("openai") == "" {
 			return fmt.Errorf("real OpenAI-compatible mode needs DEEPSEEK_API_KEY, OPENAI_API_KEY, or CODEAGENT_API_KEY")
 		}
 	}
 	return nil
-}
-
-func envAny(names ...string) string {
-	for _, name := range names {
-		if strings.TrimSpace(os.Getenv(name)) != "" {
-			return name
-		}
-	}
-	return ""
 }
 
 func writeConfig(path string, data []byte) error {

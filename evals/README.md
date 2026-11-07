@@ -260,7 +260,7 @@ isolates the subprocess and passes connection settings through the generated
 config:
 
 ```bash
-export DEEPSEEK_API_KEY="..."   # or put it in your shell profile once
+export DEEPSEEK_API_KEY="..."   # or DEEPSEEK_API_KEY=... in .env
 
 go run ./cmd/codedeep eval \
   -mode real \
@@ -310,9 +310,10 @@ and `claude`/`google` are aliases for `anthropic`/`gemini`.
 
 `CODEAGENT_API_KEY` works as a fallback for every hosted provider. Credentials
 are checked before the first task, so a missing key fails fast with a message
-naming the variables to set instead of producing a suite of 401 failures.
-Environment variables are never written to the generated config file, and mock
-mode strips all provider keys before starting the agent.
+naming the variables to set instead of producing a suite of 401 failures. Keys
+may come from the shell or from a `.env` in the repository root. Environment
+variables are never written to the generated config file, and mock mode strips
+all provider keys before starting the agent.
 
 Connection flags override any value a task might try to set:
 

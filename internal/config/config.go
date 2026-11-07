@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
+	"codedeep/internal/env"
 	"codedeep/internal/llm"
 )
 
@@ -161,7 +161,7 @@ func Default() *Config {
 }
 
 func DefaultConfigPath() string {
-	if p := os.Getenv("CODEAGENT_CONFIG"); p != "" {
+	if p := env.Get().ConfigFile; p != "" {
 		return p
 	}
 	home, _ := os.UserHomeDir()
@@ -170,10 +170,21 @@ func DefaultConfigPath() string {
 
 // Load reads the config file (if present), then applies environment overrides.
 func Load(path string) (*Config, error) {
+	vars, err := env.Load()
+	if err != nil {
+		return nil, err
+	}
+	return load(path, vars)
+}
+
+func load(path string, vars env.Vars) (*Config, error) {
 	cfg := Default()
 	explicit := path != ""
 	if path == "" {
-		path = DefaultConfigPath()
+		path = strings.TrimSpace(vars.ConfigFile)
+		if path == "" {
+			path = filepath.Join(cfg.Home, ".codedeep", "config.json")
+		}
 	}
 	cfg.ConfigPath = path
 
@@ -200,16 +211,15 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	if err := cfg.applyMCPConfigFile(); err != nil {
+	if err := cfg.applyMCPConfigFile(vars.MCPConfigFile); err != nil {
 		return nil, err
 	}
-	cfg.applyEnv()
+	cfg.applyEnv(vars)
 	cfg.normalize()
 	return cfg, nil
 }
 
-func (c *Config) applyMCPConfigFile() error {
-	path := os.Getenv("CODEAGENT_MCP_CONFIG")
+func (c *Config) applyMCPConfigFile(path string) error {
 	if path == "" {
 		return nil
 	}
@@ -232,121 +242,73 @@ func (c *Config) applyMCPConfigFile() error {
 	return nil
 }
 
-func envFirst(names ...string) string {
-	for _, n := range names {
-		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
-			return v
-		}
+func (c *Config) applyEnv(vars env.Vars) {
+	if provider := vars.ProviderName(); provider != "" {
+		c.Provider = provider
 	}
-	return ""
-}
-
-func (c *Config) applyEnv() {
-	if v := envFirst("CODEAGENT_PROVIDER"); v != "" {
-		c.Provider = v
+	if key := vars.KeyFor(c.Provider); key != "" {
+		c.APIKey = key
 	}
-	switch strings.ToLower(strings.TrimSpace(c.Provider)) {
-	case "anthropic", "claude":
-		if v := envFirst("ANTHROPIC_API_KEY", "CODEAGENT_API_KEY"); v != "" {
-			c.APIKey = v
-		}
-		if v := envFirst("ANTHROPIC_BASE_URL", "CODEAGENT_BASE_URL"); v != "" {
-			c.BaseURL = v
-		}
-	case "gemini", "google":
-		if v := envFirst("GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEAGENT_API_KEY"); v != "" {
-			c.APIKey = v
-		}
-		if v := envFirst("GEMINI_BASE_URL", "CODEAGENT_BASE_URL"); v != "" {
-			c.BaseURL = v
-		}
-	default:
-		if v := envFirst("DEEPSEEK_API_KEY", "CODEAGENT_API_KEY", "OPENAI_API_KEY"); v != "" {
-			c.APIKey = v
-		}
-		if v := envFirst("DEEPSEEK_BASE_URL", "CODEAGENT_BASE_URL", "OPENAI_BASE_URL"); v != "" {
-			c.BaseURL = v
-		}
+	if base := vars.BaseURLFor(c.Provider); base != "" {
+		c.BaseURL = base
 	}
-	if v := envFirst("CODEAGENT_MODEL", "DEEPSEEK_MODEL"); v != "" {
-		c.Model = v
+	if model := vars.ModelName(); model != "" {
+		c.Model = model
 	}
-	if v := os.Getenv("CODEAGENT_MAX_TOKENS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			c.MaxTokens = n
-		}
+	if vars.MaxTokens != nil && *vars.MaxTokens > 0 {
+		c.MaxTokens = *vars.MaxTokens
 	}
-	if v := os.Getenv("CODEAGENT_TEMPERATURE"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			c.Temperature = f
-		}
+	if vars.Temperature != nil {
+		c.Temperature = *vars.Temperature
 	}
-	if v := os.Getenv("CODEAGENT_REASONING_EFFORT"); v != "" {
-		c.ReasoningEffort = v
+	if effort := strings.TrimSpace(vars.ReasoningEffort); effort != "" {
+		c.ReasoningEffort = effort
 	}
-	if v := os.Getenv("CODEAGENT_REASONING_BUDGET"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			c.ReasoningBudget = n
-		}
+	if vars.ReasoningBudget != nil {
+		c.ReasoningBudget = *vars.ReasoningBudget
 	}
-	if v := os.Getenv("CODEAGENT_PROMPT_CACHE"); v != "" {
-		c.PromptCache = parseBool(v)
+	if vars.PromptCache != nil {
+		c.PromptCache = vars.PromptCache.Value
 	}
-	if v := os.Getenv("CODEAGENT_CONTEXT_WINDOW"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 1000 {
-			c.ContextWindow = n
-		}
+	if vars.ContextWindow != nil && *vars.ContextWindow > 1000 {
+		c.ContextWindow = *vars.ContextWindow
 	}
-	if v := os.Getenv("CODEAGENT_COMPACT_AT"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f < 1 {
-			c.CompactAt = f
-		}
+	if vars.CompactAt != nil && *vars.CompactAt > 0 && *vars.CompactAt < 1 {
+		c.CompactAt = *vars.CompactAt
 	}
-	if v := os.Getenv("CODEAGENT_APPROVAL"); v != "" {
-		c.Approval = v
+	if approval := strings.TrimSpace(vars.Approval); approval != "" {
+		c.Approval = approval
 	}
-	if v := os.Getenv("CODEAGENT_SESSIONS_DIR"); v != "" {
-		c.SessionsDir = v
+	if dir := strings.TrimSpace(vars.SessionsDir); dir != "" {
+		c.SessionsDir = dir
 	}
-	if v := os.Getenv("CODEAGENT_TRACES_DIR"); v != "" {
-		c.TracesDir = v
+	if dir := strings.TrimSpace(vars.TracesDir); dir != "" {
+		c.TracesDir = dir
 	}
-	if v := os.Getenv("CODEAGENT_SHELL"); v != "" {
-		c.Shell = v
+	if shell := strings.TrimSpace(vars.Shell); shell != "" {
+		c.Shell = shell
 	}
-	if v := os.Getenv("CODEAGENT_MAX_STEPS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			c.MaxSteps = n
-		}
+	if vars.MaxSteps != nil && *vars.MaxSteps > 0 {
+		c.MaxSteps = *vars.MaxSteps
 	}
-	if v := os.Getenv("CODEAGENT_WEB_ADDR"); v != "" {
-		c.WebAddr = v
+	if addr := strings.TrimSpace(vars.WebAddr); addr != "" {
+		c.WebAddr = addr
 	}
-	if v := os.Getenv("CODEAGENT_DEBUG"); v != "" {
-		c.Debug = parseBool(v)
+	if vars.Debug != nil {
+		c.Debug = vars.Debug.Value
 	}
-	if v := os.Getenv("CODEAGENT_ALLOW_OUTSIDE"); v != "" {
-		c.AllowOutside = parseBool(v)
+	if vars.AllowOutside != nil {
+		c.AllowOutside = vars.AllowOutside.Value
 	}
-	if v := os.Getenv("CODEAGENT_WEB_TOKEN"); v != "" {
-		c.WebToken = v
+	if token := vars.WebToken; token != "" {
+		c.WebToken = token
 	}
-	if v := os.Getenv("CODEAGENT_WEB_INSECURE"); v != "" {
-		c.WebInsecure = parseBool(v)
+	if vars.WebInsecure != nil {
+		c.WebInsecure = vars.WebInsecure.Value
 	}
-	if v := os.Getenv("CODEAGENT_DIAGNOSTIC_TIMEOUT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			c.DiagnosticTimeout = n
-		}
+	if vars.DiagnosticTimeout != nil && *vars.DiagnosticTimeout > 0 {
+		c.DiagnosticTimeout = *vars.DiagnosticTimeout
 	}
-}
-
-func parseBool(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
 }
 
 func (c *Config) normalize() {

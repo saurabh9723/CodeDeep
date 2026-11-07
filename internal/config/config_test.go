@@ -20,6 +20,7 @@ var configEnvVars = []string{
 	"CODEAGENT_REASONING_EFFORT", "CODEAGENT_REASONING_BUDGET",
 	"CODEAGENT_PROMPT_CACHE",
 	"CODEAGENT_COMPACT_AT", "CODEAGENT_APPROVAL", "CODEAGENT_SESSIONS_DIR",
+	"CODEAGENT_TRACES_DIR",
 	"CODEAGENT_SHELL", "CODEAGENT_MAX_STEPS", "CODEAGENT_WEB_ADDR",
 	"CODEAGENT_DEBUG", "CODEAGENT_ALLOW_OUTSIDE",
 	"CODEAGENT_CONFIG", "CODEAGENT_MCP_CONFIG",
@@ -146,9 +147,21 @@ func TestEnvOverrides(t *testing.T) {
 	}
 }
 
-func TestInvalidEnvValuesKeepDefaults(t *testing.T) {
+func TestInvalidEnvValuesAreRejected(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("CODEAGENT_MAX_TOKENS", "abc")
+
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "CODEAGENT_MAX_TOKENS") {
+		t.Fatalf("want an env parse error naming CODEAGENT_MAX_TOKENS, got %v", err)
+	}
+}
+
+func TestOutOfRangeEnvValuesKeepDefaults(t *testing.T) {
+	clearConfigEnv(t)
 	t.Setenv("CODEAGENT_CONTEXT_WINDOW", "500")
 	t.Setenv("CODEAGENT_COMPACT_AT", "1.5")
 	t.Setenv("CODEAGENT_APPROVAL", "yolo")
@@ -162,11 +175,11 @@ func TestInvalidEnvValuesKeepDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.MaxTokens != 8192 || cfg.ContextWindow != 128000 {
-		t.Errorf("invalid ints were applied: %d / %d", cfg.MaxTokens, cfg.ContextWindow)
+	if cfg.ContextWindow != 128000 || cfg.MaxTokens != 8192 {
+		t.Errorf("out-of-range ints were applied: %d / %d", cfg.ContextWindow, cfg.MaxTokens)
 	}
 	if cfg.CompactAt != 0.8 || cfg.Approval != "ask" || cfg.MaxSteps != 60 {
-		t.Errorf("invalid values were applied: %v / %q / %d", cfg.CompactAt, cfg.Approval, cfg.MaxSteps)
+		t.Errorf("out-of-range values were applied: %v / %q / %d", cfg.CompactAt, cfg.Approval, cfg.MaxSteps)
 	}
 }
 

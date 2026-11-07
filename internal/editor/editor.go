@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"codedeep/internal/config"
+	"codedeep/internal/env"
 )
 
 // Target is a file (or the workspace root) and an optional 1-based line.
@@ -93,9 +94,10 @@ func commandFor(cfg *config.Config, target Target) (string, []string, error) {
 		return command, args, nil
 	}
 
-	editor := strings.TrimSpace(os.Getenv("VISUAL"))
+	vars := env.Get()
+	editor := strings.TrimSpace(vars.Visual)
 	if editor == "" {
-		editor = strings.TrimSpace(os.Getenv("EDITOR"))
+		editor = strings.TrimSpace(vars.Editor)
 	}
 	if editor != "" {
 		fields := strings.Fields(editor)

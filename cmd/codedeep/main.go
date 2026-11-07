@@ -19,6 +19,7 @@ import (
 	"codedeep/internal/app"
 	"codedeep/internal/approval"
 	"codedeep/internal/config"
+	"codedeep/internal/env"
 	"codedeep/internal/jobs"
 	"codedeep/internal/llm"
 	"codedeep/internal/memory"
@@ -430,8 +431,9 @@ func stdinIsTerminal() bool {
 		return true
 	}
 	// Git Bash / mintty presents a pty as a pipe to native programs.
-	term := strings.ToLower(os.Getenv("TERM"))
-	return os.Getenv("CI") == "" && term != "" && term != "dumb" && term != "unknown"
+	vars := env.Get()
+	term := strings.ToLower(vars.Term)
+	return vars.CI == "" && term != "" && term != "dumb" && term != "unknown"
 }
 
 func readStdin() (string, error) {
@@ -449,6 +451,8 @@ Set one of:
   export DEEPSEEK_API_KEY=sk-...        (recommended)
   export CODEAGENT_API_KEY=sk-...
   export OPENAI_API_KEY=sk-...
+
+Or copy .env.example to .env in the current directory and fill in the key.
 
 Or add "api_key" to ~/.codedeep/config.json. Run "codedeep doctor" to check.`)
 }

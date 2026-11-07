@@ -14,6 +14,7 @@ import (
 
 	"codedeep/internal/agent"
 	"codedeep/internal/diagnostics"
+	"codedeep/internal/env"
 	"codedeep/internal/llm"
 	"codedeep/internal/session"
 	"codedeep/internal/util"
@@ -41,10 +42,11 @@ func (s styles) cyan(t string) string    { return s.wrap("36", t) }
 // colorEnabled reports whether ANSI output makes sense for w. Git Bash and
 // other MSYS terminals expose a pty as a pipe, so TERM is used as a hint.
 func colorEnabled(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
+	vars := env.Get()
+	if vars.NoColor != "" {
 		return false
 	}
-	term := strings.ToLower(os.Getenv("TERM"))
+	term := strings.ToLower(vars.Term)
 	if term == "dumb" {
 		return false
 	}
@@ -94,10 +96,8 @@ func newRenderer(w *os.File, debug, plain, showReasoning bool) *renderer {
 }
 
 func termWidth() int {
-	if v := os.Getenv("COLUMNS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 40 && n <= 400 {
-			return n
-		}
+	if cols := env.Get().Columns; cols != nil && *cols >= 40 && *cols <= 400 {
+		return *cols
 	}
 	return 100
 }
