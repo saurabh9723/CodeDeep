@@ -183,6 +183,7 @@ func newRunTestServer(t *testing.T, provider llm.Provider) *Server {
 		Model:       "test-model",
 		WorkDir:     t.TempDir(),
 		SessionsDir: t.TempDir(),
+		TracesDir:   t.TempDir(),
 		Home:        t.TempDir(),
 		MaxSteps:    3,
 		Approval:    "ask",

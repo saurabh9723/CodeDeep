@@ -12,6 +12,7 @@
   "compact_at": 0.8,
   "approval": "ask",
   "sessions_dir": "",
+  "traces_dir": "",
   "shell": "",
   "max_steps": 60,
   "allow_outside": false,

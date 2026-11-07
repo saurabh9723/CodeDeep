@@ -31,6 +31,7 @@ const state = {
   palette: { open: false, items: [], index: 0 },
   images: [],
   stats: { open: false, loading: false, pending: false, timer: null },
+  traces: { open: false, loading: false, items: [], selected: null, trace: null, timer: null },
 };
 
 const chat = $('#chat');
@@ -95,6 +96,17 @@ function bindUI() {
   $('#refreshBtn').addEventListener('click', refreshSessions);
   $('#themeBtn').addEventListener('click', toggleTheme);
   $('#statsBtn').addEventListener('click', openStats);
+  $('#tracesBtn').addEventListener('click', openTraces);
+  $('#tracesCloseBtn').addEventListener('click', closeTraces);
+  $('#tracesRefreshBtn').addEventListener('click', loadTraces);
+  $('#tracesOverlay').addEventListener('click', (e) => {
+    if (e.target === $('#tracesOverlay')) closeTraces();
+  });
+  $('#tracesKind').addEventListener('change', () => {
+    localStorage.setItem('codedeep-traces-kind', $('#tracesKind').value);
+    loadTraces();
+  });
+  $('#tracesSearch').addEventListener('input', renderTraceList);
   $('#statsCloseBtn').addEventListener('click', closeStats);
   $('#statsRefreshBtn').addEventListener('click', loadStats);
   $('#statsOverlay').addEventListener('click', (e) => {
@@ -235,6 +247,9 @@ function bindUI() {
       } else if (state.stats.open) {
         e.preventDefault();
         closeStats();
+      } else if (state.traces.open) {
+        e.preventDefault();
+        closeTraces();
       } else if (state.running) {
         e.preventDefault();
         stopRun();
@@ -1143,6 +1158,7 @@ async function handleEvent(ev) {
       if (typeof ev.checkpoints === 'number') setCheckpoints(ev.checkpoints);
       addToolUsage(ev.tool_usage);
       scheduleStatsRefresh();
+      scheduleTracesRefresh();
       break;
     default:
       break;
@@ -2637,6 +2653,486 @@ function renderStatsSessions(sessions, priced) {
       loadSession(sess.id);
     });
     box.append(row);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * trace viewer
+ * ------------------------------------------------------------------ */
+
+function openTraces() {
+  if (state.traces.open) return;
+  state.traces.open = true;
+  const kind = localStorage.getItem('codedeep-traces-kind');
+  if (kind && Array.from($('#tracesKind').options).some((o) => o.value === kind)) {
+    $('#tracesKind').value = kind;
+  }
+  $('#tracesOverlay').hidden = false;
+  document.body.classList.add('stats-open');
+  loadTraces();
+}
+
+function closeTraces() {
+  state.traces.open = false;
+  clearTimeout(state.traces.timer);
+  state.traces.timer = null;
+  $('#tracesOverlay').hidden = true;
+  document.body.classList.remove('stats-open');
+  input.focus();
+}
+
+function scheduleTracesRefresh() {
+  if (!state.traces.open) return;
+  clearTimeout(state.traces.timer);
+  state.traces.timer = setTimeout(() => {
+    state.traces.timer = null;
+    loadTraces();
+  }, 900);
+}
+
+async function loadTraces() {
+  if (!state.traces.open || state.traces.loading) return;
+  state.traces.loading = true;
+  $('#tracesBody').classList.add('busy');
+  const kind = $('#tracesKind').value || 'all';
+  try {
+    const rep = await api(`/api/traces?kind=${encodeURIComponent(kind)}`);
+    state.traces.items = rep.traces || [];
+    if (state.traces.selected && !state.traces.items.some((t) => t.id === state.traces.selected)) {
+      state.traces.selected = null;
+      state.traces.trace = null;
+    }
+    renderTraceList();
+    updateTracesSub();
+    if (!state.traces.selected && state.traces.items.length && window.innerWidth > 900) {
+      selectTrace(state.traces.items[0].id);
+    }
+  } catch (err) {
+    $('#tracesSub').textContent = 'could not load traces';
+    toast('Traces failed: ' + err.message);
+  } finally {
+    state.traces.loading = false;
+    $('#tracesBody').classList.remove('busy');
+  }
+}
+
+function updateTracesSub() {
+  const items = state.traces.items || [];
+  const evals = items.filter((t) => t.kind === 'eval').length;
+  const live = items.filter((t) => t.kind === 'session').length;
+  if (!items.length) {
+    $('#tracesSub').textContent = 'no traces yet · run an eval or chat to create one';
+    return;
+  }
+  $('#tracesSub').textContent = `${items.length} trace${items.length === 1 ? '' : 's'} · ${evals} eval · ${live} live`;
+}
+
+function filteredTraces() {
+  const query = $('#tracesSearch').value.trim().toLowerCase();
+  const items = state.traces.items || [];
+  if (!query) return items;
+  return items.filter((t) =>
+    [t.title, t.task, t.model, t.provider, t.session_id, t.status, (t.tags || []).join(' ')]
+      .join(' ')
+      .toLowerCase()
+      .includes(query)
+  );
+}
+
+function renderTraceList() {
+  const list = $('#tracesList');
+  if (!list) return;
+  list.innerHTML = '';
+  const items = filteredTraces();
+  if (!items.length) {
+    list.append(el('div', 'stats-empty', 'No traces match this filter.'));
+    return;
+  }
+  for (const meta of items) {
+    const row = el('button', 'trace-row');
+    row.type = 'button';
+    if (meta.id === state.traces.selected) row.classList.add('active');
+    const top = el('div', 'trace-row-top');
+    top.append(el('span', 'trace-kind ' + (meta.kind === 'eval' ? 'eval' : 'session'), meta.kind === 'eval' ? 'eval' : 'live'));
+    top.append(el('span', 'trace-row-title', meta.title || meta.task || meta.id));
+    top.append(el('span', 'trace-status ' + (meta.status || ''), meta.status || 'unknown'));
+    row.append(top);
+    const sub = el('div', 'trace-row-sub');
+    const bits = [
+      meta.kind === 'eval' ? meta.task : meta.model,
+      meta.kind === 'eval' ? meta.mode : '',
+      relTime(meta.created),
+      meta.duration_ms ? fmtDuration(meta.duration_ms) : '',
+      meta.total_tokens ? fmtShort(meta.total_tokens) + ' tok' : '',
+    ].filter(Boolean);
+    for (const bit of bits) sub.append(el('span', '', bit));
+    row.append(sub);
+    const failures = meta.failures || [];
+    if (failures.length) {
+      row.append(el('div', 'trace-row-sub', failures.length + ' issue' + (failures.length === 1 ? '' : 's') + ' · ' + truncate(failures[0], 90)));
+    }
+    row.addEventListener('click', () => selectTrace(meta.id));
+    list.append(row);
+  }
+}
+
+function fmtDuration(ms) {
+  const n = Number(ms) || 0;
+  if (n < 1000) return n + 'ms';
+  if (n < 60000) return (n / 1000).toFixed(1) + 's';
+  const minutes = Math.floor(n / 60000);
+  return minutes + 'm ' + Math.round((n % 60000) / 1000) + 's';
+}
+
+async function selectTrace(id) {
+  if (!id) return;
+  state.traces.selected = id;
+  renderTraceList();
+  const detail = $('#tracesDetail');
+  detail.innerHTML = '';
+  detail.append(el('div', 'stats-empty', 'Loading trace…'));
+  try {
+    const tr = await api('/api/traces/' + encodeURIComponent(id));
+    if (state.traces.selected !== id) return;
+    state.traces.trace = tr;
+    renderTraceDetail(tr);
+  } catch (err) {
+    if (state.traces.selected !== id) return;
+    detail.innerHTML = '';
+    detail.append(el('div', 'stats-empty', 'Could not load trace: ' + err.message));
+  }
+}
+
+async function deleteTrace(tr) {
+  if (!window.confirm('Delete this trace? The saved event stream cannot be recovered.')) return;
+  try {
+    await api('/api/traces/' + encodeURIComponent(tr.id), { method: 'DELETE' });
+    state.traces.items = state.traces.items.filter((t) => t.id !== tr.id);
+    if (state.traces.selected === tr.id) {
+      state.traces.selected = null;
+      state.traces.trace = null;
+      const detail = $('#tracesDetail');
+      detail.innerHTML = '';
+      detail.append(el('div', 'stats-empty', 'Trace deleted.'));
+    }
+    renderTraceList();
+    updateTracesSub();
+  } catch (err) {
+    toast('Delete failed: ' + err.message);
+  }
+}
+
+function renderTraceDetail(tr) {
+  const detail = $('#tracesDetail');
+  detail.innerHTML = '';
+  const head = el('div', 'trace-detail-head');
+  const copy = el('div');
+  copy.append(el('h3', 'trace-detail-title', tr.title || tr.id));
+  const sub = [tr.kind === 'eval' ? 'eval run' : 'live session', tr.task, tr.status]
+    .filter(Boolean)
+    .join(' · ');
+  copy.append(el('span', 'trace-detail-sub', sub));
+  head.append(copy);
+  const del = el('button', 'trace-delete', 'Delete');
+  del.type = 'button';
+  del.title = 'Delete this trace';
+  del.addEventListener('click', () => deleteTrace(tr));
+  head.append(del);
+  detail.append(head);
+  detail.append(renderTraceMeta(tr));
+
+  const failures = tr.failures || [];
+  const warnings = tr.warnings || [];
+  if (failures.length || warnings.length) {
+    const problems = el('div', 'trace-problems');
+    for (const f of failures) problems.append(el('div', 'trace-problem', f));
+    for (const w of warnings) problems.append(el('div', 'trace-problem warn', w));
+    detail.append(problems);
+  }
+
+  if (tr.prompt) {
+    const block = el('div', 'trace-block');
+    block.append(el('div', 'trace-block-title', 'Prompt'));
+    block.append(el('pre', '', tr.prompt));
+    detail.append(block);
+  }
+  if (tr.verifier) detail.append(renderTraceVerifier(tr.verifier));
+
+  const events = tr.events || [];
+  detail.append(el('div', 'trace-section-label', events.length + ' event' + (events.length === 1 ? '' : 's')));
+  const timeline = el('div', 'trace-timeline');
+  renderTraceTimeline(timeline, events, tr.created);
+  detail.append(timeline);
+  detail.scrollTop = 0;
+}
+
+function renderTraceMeta(tr) {
+  const grid = el('div', 'trace-meta');
+  const add = (label, value) => {
+    if (value === undefined || value === null || value === '') return;
+    const cell = el('div', 'trace-meta-cell');
+    cell.append(el('span', 'trace-meta-label', label));
+    const v = el('span', 'trace-meta-value', String(value));
+    v.title = String(value);
+    cell.append(v);
+    grid.append(cell);
+  };
+  add('Created', tr.created ? new Date(tr.created).toLocaleString() : '');
+  add('Duration', tr.duration_ms ? fmtDuration(tr.duration_ms) : '');
+  add('Provider', tr.provider);
+  add('Model', tr.model);
+  add('Mode', tr.mode);
+  add('Workspace', compactPath(tr.cwd));
+  add('Session', tr.session_id);
+  add('Model calls', tr.model_calls);
+  add('Tool calls', tr.tool_calls);
+  add('Tokens', tr.total_tokens ? fmtShort(tr.total_tokens) : '');
+  add('Cost', tr.cost_usd ? fmtCost(tr.cost_usd) : '');
+  add('Tags', (tr.tags || []).join(', '));
+  return grid;
+}
+
+function renderTraceVerifier(v) {
+  const block = el('div', 'trace-block');
+  block.append(el('div', 'trace-block-title', 'Verifier · exit ' + (v.exit_code ?? 0)));
+  if (v.command) block.append(el('pre', '', '$ ' + v.command));
+  if (v.output) block.append(el('pre', '', v.output));
+  return block;
+}
+
+function renderTraceTimeline(box, events, started) {
+  const startMs = new Date(started).getTime();
+  const toolCards = new Map();
+  for (const ev of events) {
+    const node = renderTraceEvent(ev, toolCards);
+    if (!node) continue;
+    const row = el('div', 'trace-event');
+    row.append(el('div', 'trace-time', traceOffset(ev, startMs)));
+    const body = el('div');
+    body.append(node);
+    row.append(body);
+    box.append(row);
+  }
+  if (!box.children.length) box.append(el('div', 'stats-empty', 'No events in this trace.'));
+}
+
+function traceOffset(ev, startMs) {
+  const t = new Date(ev && ev.time).getTime();
+  if (!isFinite(t) || !isFinite(startMs)) return '';
+  const delta = t - startMs;
+  if (delta < 0) return '';
+  if (delta < 1000) return '+' + delta + 'ms';
+  if (delta < 60000) return '+' + (delta / 1000).toFixed(1) + 's';
+  return '+' + Math.floor(delta / 60000) + 'm' + Math.round((delta % 60000) / 1000) + 's';
+}
+
+function markdownDiv(text) {
+  const div = el('div', 'md');
+  div.innerHTML = renderMarkdown(text);
+  return div;
+}
+
+function traceItemHead(glyph, name, summary) {
+  const head = el('div', 'trace-item-head');
+  head.append(el('span', 'trace-item-glyph', glyph));
+  head.append(el('span', 'trace-item-name', name));
+  if (summary) head.append(el('span', 'trace-item-summary', summary));
+  return head;
+}
+
+function traceDetails(label, body) {
+  const details = el('details');
+  details.append(el('summary', '', label));
+  details.append(el('pre', '', String(body)));
+  return details;
+}
+
+function traceDiffDetails(label, diff) {
+  const details = el('details');
+  details.append(el('summary', '', label));
+  const pre = el('pre', 'diff');
+  for (const line of String(diff).split('\n')) {
+    let cls = '';
+    if (line.startsWith('+') && !line.startsWith('+++')) cls = 'add';
+    else if (line.startsWith('-') && !line.startsWith('---')) cls = 'del';
+    pre.append(el('span', cls, line + '\n'));
+  }
+  details.append(pre);
+  return details;
+}
+
+function renderTraceEvent(ev, toolCards) {
+  switch (ev.type) {
+    case 'user': {
+      const item = el('div', 'trace-item user');
+      item.append(traceItemHead('›', 'user'));
+      if (ev.text) item.append(markdownDiv(ev.text));
+      return item;
+    }
+    case 'text': {
+      if (!ev.text) return null;
+      const item = el('div', 'trace-item');
+      if (ev.depth) {
+        const head = traceItemHead('✎', 'subagent text');
+        head.append(el('span', 'trace-sub', 'depth ' + ev.depth));
+        item.append(head);
+      }
+      item.append(markdownDiv(ev.text));
+      return item;
+    }
+    case 'reasoning': {
+      if (!ev.text) return null;
+      const item = el('div', 'trace-item');
+      item.append(traceDetails('reasoning', ev.text));
+      return item;
+    }
+    case 'tool_start':
+      return traceToolCard(ev, toolCards);
+    case 'tool_end':
+      return traceToolResult(ev, toolCards);
+    case 'diff': {
+      if (!ev.diff) return null;
+      const item = el('div', 'trace-item');
+      item.append(traceItemHead('±', 'diff', ev.path || ''));
+      item.append(traceDiffDetails('changes', ev.diff));
+      return item;
+    }
+    default:
+      return renderTraceOther(ev);
+  }
+}
+
+function traceToolCard(ev, toolCards) {
+  const args = parseMaybe(ev.args);
+  const item = el('div', 'trace-item');
+  const head = traceItemHead(toolGlyph(ev.name), ev.name || 'tool', summarizeArgs(ev.name, args));
+  if (ev.depth) head.append(el('span', 'trace-sub', 'depth ' + ev.depth));
+  item.append(head);
+  if (args && typeof args === 'object' && Object.keys(args).length) {
+    item.append(traceDetails('arguments', prettyArgs(args)));
+  }
+  if (ev.call_id) toolCards.set(ev.call_id, item);
+  return item;
+}
+
+function traceToolResult(ev, toolCards) {
+  const card = ev.call_id ? toolCards.get(ev.call_id) : null;
+  const target = card || el('div', 'trace-item');
+  if (!card) target.append(traceItemHead(toolGlyph(ev.name), ev.name || 'tool', 'result'));
+  if (ev.is_error) {
+    target.classList.add('error');
+    const head = target.querySelector('.trace-item-head');
+    if (head) head.append(el('span', 'trace-item-flag', 'failed'));
+  }
+  if (ev.output) target.append(traceDetails('output', ev.output));
+  if (ev.diff) target.append(traceDiffDetails('diff', ev.diff));
+  return null;
+}
+
+function traceNote(badge, text, tone) {
+  const item = el('div', 'trace-item' + (tone ? ' ' + tone : ''));
+  if (badge) {
+    const head = el('div', 'trace-item-head');
+    head.append(el('span', 'trace-badge', badge));
+    item.append(head);
+  }
+  item.append(el('div', 'trace-item-note', text || ''));
+  return item;
+}
+
+function traceUsage(usage, cost) {
+  const bits = [];
+  if (usage) {
+    if (usage.total_tokens) bits.push(fmtShort(usage.total_tokens) + ' tokens');
+    const io = [];
+    if (usage.prompt_tokens) io.push('↑' + fmtShort(usage.prompt_tokens));
+    if (usage.completion_tokens) io.push('↓' + fmtShort(usage.completion_tokens));
+    if (io.length) bits.push(io.join(' '));
+  }
+  if (cost) bits.push(fmtCost(cost));
+  return bits.join(' · ');
+}
+
+function renderTraceOther(ev) {
+  switch (ev.type) {
+    case 'session':
+      return traceNote('session', ev.message || 'started');
+    case 'compact':
+      return traceNote('compact', ev.message || 'context compacted');
+    case 'usage': {
+      const text = traceUsage(ev.usage, ev.cost_usd);
+      return text ? traceNote('usage', text) : null;
+    }
+    case 'approval_request': {
+      const item = el('div', 'trace-item');
+      const head = traceItemHead('?', ev.name || 'approval');
+      head.append(el('span', 'trace-badge approval', 'approval'));
+      item.append(head);
+      if (ev.message) item.append(el('div', 'trace-item-note', ev.message));
+      const args = parseMaybe(ev.args);
+      if (args && typeof args === 'object' && Object.keys(args).length) {
+        item.append(traceDetails('request', prettyArgs(args)));
+      }
+      return item;
+    }
+    case 'approval_result':
+      return traceNote('approval', ev.message || (ev.is_error ? 'denied' : 'approved'), ev.is_error ? 'warn' : '');
+    case 'subagent_start': {
+      const summary = ev.message || summarizeArgs('agent', parseMaybe(ev.args));
+      return traceNote('subagent', summary || 'started');
+    }
+    case 'subagent_end':
+      return traceNote('subagent', ev.message || 'finished', ev.is_error ? 'error' : 'ok');
+    case 'hook':
+      return traceNote('hook', (ev.name ? ev.name + ' · ' : '') + (ev.message || ''), ev.is_error ? 'warn' : '');
+    case 'verify_start':
+      return traceNote('verify', ev.message || 'verification started');
+    case 'verify': {
+      const item = el('div', 'trace-item' + (ev.is_error ? ' error' : ' ok'));
+      item.append(traceItemHead('✓', ev.message || 'verify'));
+      if (ev.output) item.append(traceDetails('output', ev.output));
+      return item;
+    }
+    case 'retry': {
+      const r = ev.retry || {};
+      const when = r.max ? `attempt ${r.attempt}/${r.max}` : '';
+      const delay = r.delay_ms ? ' in ' + formatDelay(r.delay_ms) : '';
+      const msg = [when + delay, r.message].filter(Boolean).join(' · ');
+      return traceNote('retry', msg || ev.message || 'retrying', 'warn');
+    }
+    case 'diagnostics': {
+      const list = ev.annotations || [];
+      if (!list.length) return null;
+      const item = el('div', 'trace-item' + (list.some((d) => /error/i.test(d.severity || '')) ? ' warn' : ''));
+      item.append(traceItemHead('⚑', 'diagnostics', list.length + ' finding' + (list.length === 1 ? '' : 's')));
+      for (const d of list) {
+        const where = d.path ? compactPath(d.path) + (d.line ? ':' + d.line : '') : '';
+        item.append(el('div', 'trace-item-note', [d.severity, where, d.message].filter(Boolean).join(' · ')));
+      }
+      return item;
+    }
+    case 'todos': {
+      const todos = ev.todos || [];
+      if (!todos.length) return null;
+      const item = el('div', 'trace-item');
+      item.append(traceItemHead('☰', 'plan'));
+      for (const todo of todos) {
+        const mark = todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '▸' : '·';
+        item.append(el('div', 'trace-item-note', mark + ' ' + todo.text));
+      }
+      return item;
+    }
+    case 'done': {
+      const text = [ev.message || 'done', traceUsage(ev.total_usage, ev.total_cost)].filter(Boolean).join(' · ');
+      return traceNote('done', text, 'ok');
+    }
+    case 'error':
+      return traceNote('error', ev.message || 'error', 'error');
+    case 'assistant_start':
+    case 'saved':
+      return null;
+    default:
+      return ev.type ? traceNote(ev.type, ev.message || '') : null;
   }
 }
 

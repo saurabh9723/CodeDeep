@@ -59,6 +59,9 @@ type Event struct {
 	Message     string                   `json:"message,omitempty"`
 	Annotations []diagnostics.Diagnostic `json:"annotations,omitempty"`
 	Todos       []session.Todo           `json:"todos,omitempty"`
+	// Time is stamped on emission so persisted traces keep event ordering and
+	// pacing after the run ends.
+	Time string `json:"time,omitempty"`
 	// Seq is assigned by the web transport so reconnecting clients can resume
 	// exactly where they left off. Other emitters leave it zero.
 	Seq int64 `json:"seq,omitempty"`

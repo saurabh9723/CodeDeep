@@ -40,6 +40,7 @@ type RunResult struct {
 	MockRequests int             `json:"mock_requests,omitempty"`
 	StderrTail   string          `json:"stderr_tail,omitempty"`
 	HarnessError string          `json:"harness_error,omitempty"`
+	TraceID      string          `json:"trace_id,omitempty"`
 }
 
 // TaskResult aggregates repeated runs of one task.

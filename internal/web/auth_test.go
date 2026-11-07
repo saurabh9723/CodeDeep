@@ -210,6 +210,7 @@ func TestAuthenticatedHandlerRoutes(t *testing.T) {
 	cfg := &config.Config{
 		WorkDir:     work,
 		SessionsDir: t.TempDir(),
+		TracesDir:   t.TempDir(),
 		Home:        t.TempDir(),
 		WebToken:    "secret",
 		Editor:      &config.Editor{Command: command, Args: args},

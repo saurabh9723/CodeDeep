@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"codedeep/internal/eval"
@@ -41,7 +42,13 @@ func cmdEval(args []string) int {
 		priceOut         float64
 		priceCacheHit    float64
 		priceCacheWrite  float64
+		traceDir         string
+		noTraces         bool
 	)
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		home = "."
+	}
 	fs.StringVar(&suite, "suite", "evals/tasks", "task suite directory")
 	fs.StringVar(&mode, "mode", "mock", "provider mode: mock or real")
 	fs.StringVar(&provider, "provider", "", "real provider: openai, anthropic, gemini, or ollama")
@@ -68,6 +75,8 @@ func cmdEval(args []string) int {
 	fs.Float64Var(&priceOut, "price-out", 0, "USD per million output tokens (real mode)")
 	fs.Float64Var(&priceCacheHit, "price-cache-hit", 0, "USD per million cache-read tokens (real mode)")
 	fs.Float64Var(&priceCacheWrite, "price-cache-write", 0, "USD per million cache-write tokens (real mode)")
+	fs.StringVar(&traceDir, "trace-dir", filepath.Join(home, ".codedeep", "traces"), "directory for persisted run traces")
+	fs.BoolVar(&noTraces, "no-traces", false, "do not persist run traces")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -90,6 +99,9 @@ func cmdEval(args []string) int {
 	if listOnly {
 		return listEvalTasks(suite, filter)
 	}
+	if noTraces {
+		traceDir = ""
+	}
 	opts := eval.Options{
 		Suite:              suite,
 		Binary:             binary,
@@ -111,6 +123,7 @@ func cmdEval(args []string) int {
 		UpdateBaselinePath: updateBaseline,
 		FailOnRegression:   failOnRegression,
 		RegressionPct:      regressionPct,
+		TraceDir:           traceDir,
 	}
 	ctx, cancel := signalContext(context.Background())
 	defer cancel()

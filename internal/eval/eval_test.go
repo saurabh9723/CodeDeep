@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"codedeep/internal/llm"
+	"codedeep/internal/trace"
 )
 
 func writeFile(t *testing.T, path, body string) {
@@ -458,6 +459,7 @@ func TestRunTinySuiteEndToEnd(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	traceDir := filepath.Join(root, "traces")
 	report, err := Run(ctx, Options{
 		Suite:       filepath.Join(root, "suite"),
 		Binary:      binary,
@@ -465,6 +467,7 @@ func TestRunTinySuiteEndToEnd(t *testing.T) {
 		Repeat:      1,
 		Jobs:        1,
 		MinPassRate: 1,
+		TraceDir:    traceDir,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -474,5 +477,30 @@ func TestRunTinySuiteEndToEnd(t *testing.T) {
 	}
 	if report.Tasks[0].Metrics.ModelCalls != 2 || report.Tasks[0].Metrics.ToolCalls != 1 {
 		t.Fatalf("unexpected metrics: %+v", report.Tasks[0].Metrics)
+	}
+	traceID := report.Tasks[0].Runs[0].TraceID
+	if traceID == "" {
+		t.Fatal("run did not record a trace id")
+	}
+	store := trace.New(traceDir)
+	metas, err := store.List()
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("trace list: %v (%d traces)", err, len(metas))
+	}
+	saved, err := store.Load(traceID)
+	if err != nil {
+		t.Fatalf("load trace: %v", err)
+	}
+	if saved.Kind != trace.KindEval || saved.Task != "smoke" || saved.Status != StatusPassed {
+		t.Fatalf("unexpected trace meta: %+v", saved.Meta)
+	}
+	if saved.Passed == nil || !*saved.Passed {
+		t.Fatalf("trace passed flag not set: %+v", saved.Meta)
+	}
+	if len(saved.Events) == 0 || saved.Events[0].Time == "" {
+		t.Fatalf("trace events missing timestamps: %+v", saved.Events[:min(1, len(saved.Events))])
+	}
+	if saved.Prompt != "create ok.txt" {
+		t.Fatalf("prompt not captured: %q", saved.Prompt)
 	}
 }

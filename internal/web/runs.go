@@ -33,6 +33,7 @@ type activeRun struct {
 
 	mu       sync.Mutex
 	events   []queuedEvent
+	all      []agent.Event
 	bytes    int
 	seq      int64
 	saved    int64
@@ -56,6 +57,7 @@ func (r *activeRun) emit(ev agent.Event) {
 	ev.Seq = r.seq
 	q := queuedEvent{seq: r.seq, ev: ev}
 	r.events = append(r.events, q)
+	r.all = append(r.all, ev)
 	r.bytes += eventSize(ev)
 	for len(r.events) > 1 && (len(r.events) > runBufferEvents || r.bytes > runBufferBytes) {
 		r.bytes -= eventSize(r.events[0].ev)
@@ -79,6 +81,16 @@ func (r *activeRun) emit(ev agent.Event) {
 			delete(r.subs, id)
 		}
 	}
+}
+
+// snapshot returns the uncapped event stream for persistence. The replay
+// buffer is trimmed for memory, but a trace keeps the whole run.
+func (r *activeRun) snapshot() []agent.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]agent.Event, len(r.all))
+	copy(out, r.all)
+	return out
 }
 
 // attach registers a viewer. after < 0 resumes from the last persisted point,

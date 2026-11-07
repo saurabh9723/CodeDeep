@@ -45,6 +45,8 @@ type Options struct {
 	UpdateBaselinePath string
 	FailOnRegression   bool
 	RegressionPct      float64
+	// TraceDir persists one trace per run when set. Empty disables tracing.
+	TraceDir string
 }
 
 // Run discovers, executes, and scores tasks.
@@ -254,7 +256,7 @@ func runTask(ctx context.Context, opts Options, task Task, index int, runRoot, g
 		if ctx.Err() != nil {
 			break
 		}
-		run := runOnce(ctx, opts, task, filepath.Join(taskRoot, fmt.Sprintf("run-%d", i+1)), gocache, binary)
+		run := runOnce(ctx, opts, task, filepath.Join(taskRoot, fmt.Sprintf("run-%d", i+1)), gocache, binary, i+1, opts.Repeat)
 		result.Runs = append(result.Runs, run)
 	}
 	return aggregateTask(opts, result)
@@ -329,7 +331,7 @@ func runLabel(index, total int) string {
 	return fmt.Sprintf("%d/%d", index+1, total)
 }
 
-func runOnce(ctx context.Context, opts Options, task Task, runDir, gocache, binary string) RunResult {
+func runOnce(ctx context.Context, opts Options, task Task, runDir, gocache, binary string, runNumber, runTotal int) RunResult {
 	workspace := filepath.Join(runDir, "workspace")
 	home := filepath.Join(runDir, "home")
 	sessions := filepath.Join(runDir, "sessions")
@@ -457,6 +459,14 @@ func runOnce(ctx context.Context, opts Options, task Task, runDir, gocache, bina
 		Verifier:     verifier,
 		MockRequests: mockRequests,
 		StderrTail:   truncate(stderr.String(), 4000),
+	}
+	if opts.TraceDir != "" {
+		id, err := saveEvalTrace(opts, task, run, obs.Events, started, workspace, runNumber, runTotal)
+		if err != nil {
+			run.Warnings = append(run.Warnings, "trace save failed: "+err.Error())
+		} else {
+			run.TraceID = id
+		}
 	}
 	return run
 }

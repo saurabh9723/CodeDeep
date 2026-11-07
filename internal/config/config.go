@@ -91,6 +91,7 @@ type Config struct {
 	Approval          string               `json:"approval"`
 	WorkDir           string               `json:"-"`
 	SessionsDir       string               `json:"sessions_dir"`
+	TracesDir         string               `json:"traces_dir"`
 	Shell             string               `json:"shell"`
 	MaxSteps          int                  `json:"max_steps"`
 	AllowOutside      bool                 `json:"allow_outside"`
@@ -146,6 +147,7 @@ func Default() *Config {
 		Approval:      "ask",
 		WorkDir:       wd,
 		SessionsDir:   filepath.Join(home, ".codedeep", "sessions"),
+		TracesDir:     filepath.Join(home, ".codedeep", "traces"),
 		MaxSteps:      60,
 		WebAddr:       "127.0.0.1:7777",
 		MCPServers:    map[string]MCPServer{},
@@ -306,6 +308,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("CODEAGENT_SESSIONS_DIR"); v != "" {
 		c.SessionsDir = v
 	}
+	if v := os.Getenv("CODEAGENT_TRACES_DIR"); v != "" {
+		c.TracesDir = v
+	}
 	if v := os.Getenv("CODEAGENT_SHELL"); v != "" {
 		c.Shell = v
 	}
@@ -383,6 +388,12 @@ func (c *Config) normalize() {
 	}
 	if abs, err := filepath.Abs(c.SessionsDir); err == nil {
 		c.SessionsDir = abs
+	}
+	if c.TracesDir == "" {
+		c.TracesDir = filepath.Join(c.Home, ".codedeep", "traces")
+	}
+	if abs, err := filepath.Abs(c.TracesDir); err == nil {
+		c.TracesDir = abs
 	}
 	if c.MCPServers == nil {
 		c.MCPServers = map[string]MCPServer{}

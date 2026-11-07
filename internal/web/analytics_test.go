@@ -21,6 +21,7 @@ func analyticsTestHandler(t *testing.T) http.Handler {
 		WorkDir:     t.TempDir(),
 		Home:        t.TempDir(),
 		SessionsDir: t.TempDir(),
+		TracesDir:   t.TempDir(),
 		Pricing: map[string]config.Price{
 			"test-model": {InputPerMTok: 1, OutputPerMTok: 2},
 		},

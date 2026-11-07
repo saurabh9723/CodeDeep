@@ -83,6 +83,9 @@
           <button class="icon-btn" id="undoBtn" title="Review checkpoints and roll back" aria-label="Review checkpoints and roll back" hidden>
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-1"/></svg>
           </button>
+          <button class="icon-btn" id="tracesBtn" title="Run traces" aria-label="Run traces">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><path d="M7 6h6a4 4 0 014 4v4a4 4 0 01-4 4H7"/></svg>
+          </button>
           <button class="icon-btn" id="statsBtn" title="Observability" aria-label="Observability">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 20V10M10 20V4M16 20v-7M22 20V7"/></svg>
           </button>
@@ -251,6 +254,39 @@
             <div class="stats-card-head"><span>Recent sessions</span></div>
             <div class="stats-sessions" id="statsSessions"></div>
           </section>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="stats-overlay traces-overlay" id="tracesOverlay" hidden>
+    <section class="stats-modal traces-modal" role="dialog" aria-modal="true" aria-labelledby="tracesTitle">
+      <header class="stats-head">
+        <div class="stats-heading">
+          <h2 id="tracesTitle">Traces</h2>
+          <span class="stats-sub" id="tracesSub">eval runs and live sessions</span>
+        </div>
+        <div class="stats-controls">
+          <label class="stats-select">Kind
+            <select id="tracesKind">
+              <option value="all">All runs</option>
+              <option value="eval">Eval runs</option>
+              <option value="session">Live sessions</option>
+            </select>
+          </label>
+          <input class="traces-search" id="tracesSearch" type="search" placeholder="Filter traces…" autocomplete="off" spellcheck="false" aria-label="Filter traces">
+          <button class="icon-btn" id="tracesRefreshBtn" title="Refresh" aria-label="Refresh traces">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 11a8 8 0 10-2.3 5.7M20 5v6h-6"/></svg>
+          </button>
+          <button class="icon-btn" id="tracesCloseBtn" title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="stats-body traces-body" id="tracesBody">
+        <div class="traces-layout">
+          <div class="traces-list" id="tracesList"></div>
+          <div class="traces-detail" id="tracesDetail"></div>
         </div>
       </div>
     </section>

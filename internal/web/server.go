@@ -20,15 +20,17 @@ import (
 	"codedeep/internal/approval"
 	"codedeep/internal/llm"
 	"codedeep/internal/session"
+	"codedeep/internal/trace"
 )
 
 //go:embed static/*
 var staticFS embed.FS
 
 type Server struct {
-	App  *app.App
-	hub  *approvalHub
-	runs *runRegistry
+	App    *app.App
+	hub    *approvalHub
+	runs   *runRegistry
+	traces *trace.Store
 
 	mu           sync.Mutex
 	active       map[string]bool
@@ -36,10 +38,15 @@ type Server struct {
 }
 
 func New(a *app.App) *Server {
+	var traces *trace.Store
+	if a.Cfg.TracesDir != "" {
+		traces = trace.New(a.Cfg.TracesDir)
+	}
 	return &Server{
 		App:    a,
 		hub:    newApprovalHub(),
 		runs:   newRunRegistry(),
+		traces: traces,
 		active: map[string]bool{},
 	}
 }
@@ -59,6 +66,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("GET /api/analytics", s.handleAnalytics)
+	mux.HandleFunc("GET /api/traces", s.handleListTraces)
+	mux.HandleFunc("GET /api/traces/{id}", s.handleGetTrace)
+	mux.HandleFunc("DELETE /api/traces/{id}", s.handleDeleteTrace)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", s.handleStreamRun)
@@ -399,18 +409,27 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) executeRun(ctx context.Context, run *activeRun, sess *session.Session, prompt string, images []llm.Image) {
+	started := time.Now()
+	status := "completed"
 	defer func() {
 		if p := recover(); p != nil {
+			status = "error"
 			run.emit(agent.Event{Type: agent.EventError, SessionID: sess.ID, Message: fmt.Sprintf("run crashed: %v", p)})
 			s.App.Logf("chat %s panicked: %v", sess.ID, p)
 		}
+		s.saveSessionTrace(run, sess, prompt, started, status)
 		run.finish()
 		time.AfterFunc(runRetention, func() { s.runs.remove(run) })
 	}()
 
 	run.emit(agent.Event{Type: "session", SessionID: sess.ID, Message: sess.Title})
 	ag := s.App.NewAgent(approval.Func(s.hub.approve), run.emit)
-	if err := ag.RunWithImages(ctx, sess, prompt, images); err != nil && !errors.Is(err, context.Canceled) {
+	err := ag.RunWithImages(ctx, sess, prompt, images)
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
+		status = "cancelled"
+	case err != nil:
+		status = "error"
 		s.App.Logf("chat %s: %v", sess.ID, err)
 	}
 }

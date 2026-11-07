@@ -153,6 +153,9 @@ func New(opts Options) *Agent {
 func (a *Agent) emitEvent(ev Event) {
 	a.locks.emit.Lock()
 	defer a.locks.emit.Unlock()
+	if ev.Time == "" {
+		ev.Time = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	a.emit.Emit(ev)
 }
 

@@ -230,6 +230,33 @@ available at `GET /api/analytics?days=30&scope=all|workspace` and powers the web
 dashboard. When no model pricing is configured the report still shows tokens and
 cache metrics and marks cost as unavailable.
 
+### Trace viewer
+
+Every run can be recorded as a trace: a file-backed JSON document holding the
+run metadata, prompt, verifier result, and the full timestamped event stream.
+Eval runs and web chat runs both write traces, so benchmarks and live sessions
+can be inspected the same way.
+
+Traces live in `~/.codedeep/traces` by default. Set `traces_dir` (or
+`CODEAGENT_TRACES_DIR`) to move them, or to an empty path to disable capture.
+Each trace stores a small metadata header used for listing plus the full event
+log; the store keeps the newest 500 and prunes older files.
+
+The web UI has a **Traces** button that opens the viewer: filter by kind (eval
+or session), search by title/task/model/status, and select a run to see its
+metadata, prompt, verifier output, and a merged timeline of messages, tool
+calls, diffs, approvals, retries, and usage. Traces can be deleted from the
+detail pane.
+
+```text
+GET    /api/traces?kind=eval|session&q=TEXT
+GET    /api/traces/{id}
+DELETE /api/traces/{id}
+```
+
+The eval harness writes a trace per run and accepts `-trace-dir DIR` to choose
+the destination and `-no-traces` to skip capture entirely.
+
 ## Common flags
 
 - `-config PATH` — config file (default `~/.codedeep/config.json`).
@@ -263,6 +290,7 @@ config file is fine. See [`config.example.json`](config.example.json).
   "context_window": 128000,
   "compact_at": 0.8,
   "approval": "ask",
+  "traces_dir": "",
   "max_steps": 60,
   "shell": "",
   "web_addr": "127.0.0.1:7777",
@@ -694,7 +722,9 @@ and the verification gate (passing, failure feedback, the two-attempt cap, and
 skipping turns that changed nothing). Analytics have dedicated fixtures for
 daily bucketing, range and workspace filters, cache-hit math, per-model and
 per-tool aggregation, the hourly heatmap, legacy sessions without per-turn
-stats, and the `/api/analytics` endpoint.
+stats, and the `/api/analytics` endpoint. Trace coverage includes store
+round-trip, pruning and unsafe-ID rejection, eval trace persistence, live
+session capture, and the trace list/get/delete API.
 
 The evaluation harness has its own tests for task discovery and strict schema
 validation, filter selection, config and environment isolation, scoring and
@@ -786,6 +816,7 @@ internal/hooks    pre/post tool shell hooks
 internal/diagnostics post-edit build, vet, and lint commands
 internal/memory   durable project/global notes and the remember/recall/forget tools
 internal/analytics session aggregation for token/cost/cache/tool observability
+internal/trace     file-backed run traces for eval and live session replay
 internal/verify   end-of-turn verification command runner
 internal/skills   markdown skill discovery and the use_skill tool
 internal/jobs     background process manager and job tools
