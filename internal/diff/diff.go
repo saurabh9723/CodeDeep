@@ -36,6 +36,28 @@ func SplitLines(text string) []string {
 	return lines
 }
 
+// Line is one line of a structured diff. Op is ' ' (unchanged), '-' (removed
+// from the old text), or '+' (added in the new text).
+type Line struct {
+	Op   string `json:"op"`
+	Text string `json:"text"`
+}
+
+// Lines returns a line-by-line diff between oldText and newText. Unlike
+// Unified, it keeps every line and emits no hunk headers, which makes it
+// suitable for rendering side-by-side comparisons in a UI.
+func Lines(oldText, newText string) []Line {
+	if oldText == newText {
+		return nil
+	}
+	ops := diffLines(SplitLines(oldText), SplitLines(newText))
+	out := make([]Line, 0, len(ops))
+	for _, o := range ops {
+		out = append(out, Line{Op: string(o.kind), Text: o.text})
+	}
+	return out
+}
+
 // Unified renders a unified diff between oldText and newText. It returns an
 // empty string when the inputs are identical.
 func Unified(path, oldText, newText string, contextLines int) string {

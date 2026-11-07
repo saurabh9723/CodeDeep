@@ -67,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("GET /api/analytics", s.handleAnalytics)
 	mux.HandleFunc("GET /api/traces", s.handleListTraces)
+	mux.HandleFunc("GET /api/traces/compare", s.handleCompareTraces)
 	mux.HandleFunc("GET /api/traces/{id}", s.handleGetTrace)
 	mux.HandleFunc("DELETE /api/traces/{id}", s.handleDeleteTrace)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)

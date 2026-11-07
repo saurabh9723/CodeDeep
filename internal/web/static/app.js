@@ -31,7 +31,7 @@ const state = {
   palette: { open: false, items: [], index: 0 },
   images: [],
   stats: { open: false, loading: false, pending: false, timer: null },
-  traces: { open: false, loading: false, items: [], selected: null, trace: null, timer: null },
+  traces: { open: false, loading: false, items: [], selected: null, trace: null, timer: null, compareBase: null },
 };
 
 const chat = $('#chat');
@@ -2739,6 +2739,7 @@ function renderStatsSessions(sessions, priced) {
 function openTraces() {
   if (state.traces.open) return;
   state.traces.open = true;
+  state.traces.compareBase = null;
   const kind = localStorage.getItem('codedeep-traces-kind');
   if (kind && Array.from($('#tracesKind').options).some((o) => o.value === kind)) {
     $('#tracesKind').value = kind;
@@ -2750,6 +2751,7 @@ function openTraces() {
 
 function closeTraces() {
   state.traces.open = false;
+  state.traces.compareBase = null;
   clearTimeout(state.traces.timer);
   state.traces.timer = null;
   $('#tracesOverlay').hidden = true;
@@ -2778,9 +2780,12 @@ async function loadTraces() {
       state.traces.selected = null;
       state.traces.trace = null;
     }
+    if (state.traces.compareBase && !state.traces.items.some((t) => t.id === state.traces.compareBase)) {
+      state.traces.compareBase = null;
+    }
     renderTraceList();
     updateTracesSub();
-    if (!state.traces.selected && state.traces.items.length && window.innerWidth > 900) {
+    if (!state.traces.selected && !state.traces.compareBase && state.traces.items.length && window.innerWidth > 900) {
       selectTrace(state.traces.items[0].id);
     }
   } catch (err) {
@@ -2828,7 +2833,12 @@ function renderTraceList() {
     const row = el('button', 'trace-row');
     row.type = 'button';
     if (meta.id === state.traces.selected) row.classList.add('active');
+    if (meta.id === state.traces.compareBase) {
+      row.classList.add('compare-base');
+      row.title = 'Compare base · pick another trace to diff against this one';
+    }
     const top = el('div', 'trace-row-top');
+    if (meta.id === state.traces.compareBase) top.append(el('span', 'trace-compare-tag', 'A'));
     top.append(el('span', 'trace-kind ' + (meta.kind === 'eval' ? 'eval' : 'session'), meta.kind === 'eval' ? 'eval' : 'live'));
     top.append(el('span', 'trace-row-title', meta.title || meta.task || meta.id));
     top.append(el('span', 'trace-status ' + (meta.status || ''), meta.status || 'unknown'));
@@ -2862,6 +2872,10 @@ function fmtDuration(ms) {
 
 async function selectTrace(id) {
   if (!id) return;
+  if (state.traces.compareBase && id !== state.traces.compareBase) {
+    await selectTraceCompare(state.traces.compareBase, id);
+    return;
+  }
   state.traces.selected = id;
   renderTraceList();
   const detail = $('#tracesDetail');
@@ -2883,6 +2897,8 @@ async function deleteTrace(tr) {
   if (!window.confirm('Delete this trace? The saved event stream cannot be recovered.')) return;
   try {
     await api('/api/traces/' + encodeURIComponent(tr.id), { method: 'DELETE' });
+    const wasCompareBase = state.traces.compareBase === tr.id;
+    if (wasCompareBase) state.traces.compareBase = null;
     state.traces.items = state.traces.items.filter((t) => t.id !== tr.id);
     if (state.traces.selected === tr.id) {
       state.traces.selected = null;
@@ -2893,9 +2909,242 @@ async function deleteTrace(tr) {
     }
     renderTraceList();
     updateTracesSub();
+    if (wasCompareBase && state.traces.selected) selectTrace(state.traces.selected);
   } catch (err) {
     toast('Delete failed: ' + err.message);
   }
+}
+
+function startTraceCompare(id) {
+  state.traces.compareBase = id;
+  state.traces.selected = null;
+  renderTraceList();
+  const detail = $('#tracesDetail');
+  detail.innerHTML = '';
+  const box = el('div', 'trace-compare-pending');
+  box.append(el('h3', 'trace-detail-title', 'Compare traces'));
+  box.append(el('div', 'trace-item-note', 'Pick a second trace in the list to diff it against the highlighted one.'));
+  const cancel = el('button', 'trace-compare', 'Cancel');
+  cancel.type = 'button';
+  cancel.addEventListener('click', cancelTraceCompare);
+  box.append(cancel);
+  detail.append(box);
+  $('#tracesSub').textContent = 'compare · choose the second trace';
+}
+
+function cancelTraceCompare() {
+  const base = state.traces.compareBase;
+  state.traces.compareBase = null;
+  renderTraceList();
+  updateTracesSub();
+  if (base) selectTrace(base);
+}
+
+async function selectTraceCompare(aID, bID) {
+  state.traces.selected = bID;
+  renderTraceList();
+  const detail = $('#tracesDetail');
+  detail.innerHTML = '';
+  detail.append(el('div', 'stats-empty', 'Comparing traces…'));
+  try {
+    const cmp = await api(
+      `/api/traces/compare?a=${encodeURIComponent(aID)}&b=${encodeURIComponent(bID)}`
+    );
+    if (state.traces.compareBase !== aID || state.traces.selected !== bID) return;
+    renderTraceCompare(cmp);
+  } catch (err) {
+    if (state.traces.compareBase !== aID || state.traces.selected !== bID) return;
+    detail.innerHTML = '';
+    detail.append(el('div', 'stats-empty', 'Could not compare traces: ' + err.message));
+  }
+}
+
+function renderTraceCompare(cmp) {
+  const detail = $('#tracesDetail');
+  detail.innerHTML = '';
+  const head = el('div', 'trace-detail-head');
+  const copy = el('div');
+  copy.append(el('h3', 'trace-detail-title', 'Compare'));
+  copy.append(
+    el('span', 'trace-detail-sub', `${cmp.a.title || cmp.a.id} → ${cmp.b.title || cmp.b.id}`)
+  );
+  head.append(copy);
+  const actions = el('div', 'trace-actions');
+  const swap = el('button', 'trace-compare', 'Swap A/B');
+  swap.type = 'button';
+  swap.title = 'Reverse the comparison direction';
+  swap.addEventListener('click', () => {
+    state.traces.compareBase = cmp.b.id;
+    selectTraceCompare(cmp.b.id, cmp.a.id);
+  });
+  const done = el('button', 'trace-compare', 'Done');
+  done.type = 'button';
+  done.addEventListener('click', () => {
+    const keep = state.traces.selected;
+    state.traces.compareBase = null;
+    renderTraceList();
+    updateTracesSub();
+    if (keep) selectTrace(keep);
+  });
+  actions.append(swap, done);
+  head.append(actions);
+  detail.append(head);
+  $('#tracesSub').textContent = cmp.same_kind
+    ? `comparing 2 ${cmp.a.kind === 'eval' ? 'eval runs' : 'live sessions'}`
+    : 'comparing 2 runs of different kinds';
+
+  detail.append(renderCompareSides(cmp));
+  detail.append(renderCompareMetrics(cmp.metrics));
+  const problems = renderCompareProblems(cmp);
+  if (problems) detail.append(problems);
+  detail.append(renderCompareTools(cmp.tools));
+  detail.append(renderCompareEvents(cmp.events));
+  if (cmp.prompt && cmp.prompt.changed) detail.append(renderCompareText('Prompt diff', cmp.prompt));
+  if (cmp.answer && cmp.answer.changed) detail.append(renderCompareText('Answer diff', cmp.answer));
+  detail.scrollTop = 0;
+}
+
+function renderCompareSides(cmp) {
+  const grid = el('div', 'trace-compare-grid');
+  const side = (label, meta) => {
+    const card = el('div', 'trace-side');
+    const head = el('div', 'trace-side-head');
+    head.append(el('span', 'trace-side-label', label));
+    head.append(el('span', 'trace-status ' + (meta.status || ''), meta.status || 'unknown'));
+    card.append(head);
+    card.append(el('div', 'trace-side-title', meta.title || meta.id));
+    const passed = meta.passed === true ? 'passed' : meta.passed === false ? 'failed' : '';
+    const bits = [
+      meta.kind === 'eval' ? 'eval run' : 'live session',
+      meta.task,
+      meta.mode,
+      meta.model,
+      passed,
+      relTime(meta.created),
+    ].filter(Boolean);
+    card.append(el('div', 'trace-side-sub', bits.join(' · ')));
+    return card;
+  };
+  grid.append(side('A', cmp.a), side('B', cmp.b));
+  return grid;
+}
+
+function renderCompareMetrics(metrics) {
+  const box = el('div', 'trace-metrics');
+  const specs = [
+    { label: 'Duration', d: metrics.duration_ms, fmt: (v) => (v ? fmtDuration(v) : '0ms'), delta: (v) => fmtDuration(v) },
+    { label: 'Model calls', d: metrics.model_calls, fmt: String, delta: String },
+    { label: 'Tool calls', d: metrics.tool_calls, fmt: String, delta: String },
+    { label: 'Tokens', d: metrics.total_tokens, fmt: (v) => fmtShort(v), delta: (v) => fmtShort(v) },
+    { label: 'Cost', d: metrics.cost_usd, fmt: (v) => fmtCost(v) || '$0', delta: (v) => '$' + Number(v).toFixed(4) },
+    { label: 'Events', d: metrics.event_count, fmt: String, delta: String },
+  ];
+  for (const spec of specs) {
+    const card = el('div', 'trace-metric');
+    card.append(el('div', 'trace-metric-name', spec.label));
+    const values = el('div', 'trace-metric-values');
+    values.append(el('span', 'trace-metric-a', spec.fmt(spec.d.a)));
+    values.append(el('span', 'trace-metric-arrow', '→'));
+    values.append(el('span', 'trace-metric-b', spec.fmt(spec.d.b)));
+    card.append(values);
+    const delta = Number(spec.d.delta) || 0;
+    const tone = delta === 0 ? 'same' : delta < 0 ? 'better' : 'worse';
+    const text = delta === 0 ? 'no change' : (delta > 0 ? '+' : '-') + spec.delta(Math.abs(delta));
+    card.append(el('span', 'trace-metric-delta ' + tone, text));
+    box.append(card);
+  }
+  return box;
+}
+
+function renderCompareProblems(cmp) {
+  const groups = [
+    { title: 'Fixed in B', items: cmp.failures.only_a, tone: 'ok' },
+    { title: 'New in B', items: cmp.failures.only_b, tone: 'bad' },
+    { title: 'Still failing', items: cmp.failures.same, tone: 'same' },
+    { title: 'Warnings only in A', items: cmp.warnings.only_a, tone: 'warn' },
+    { title: 'Warnings only in B', items: cmp.warnings.only_b, tone: 'warn' },
+    { title: 'Warnings in both', items: cmp.warnings.same, tone: 'same' },
+  ].filter((group) => (group.items || []).length);
+  if (!groups.length) return null;
+  const block = el('div', 'trace-compare-section');
+  block.append(el('div', 'trace-section-label', 'Problems'));
+  for (const group of groups) {
+    const box = el('div', 'trace-problem-group ' + group.tone);
+    box.append(el('div', 'trace-problem-title', group.title));
+    for (const item of group.items) box.append(el('div', 'trace-problem', item));
+    block.append(box);
+  }
+  return block;
+}
+
+function renderCompareTools(tools) {
+  const block = el('div', 'trace-compare-section');
+  block.append(
+    el(
+      'div',
+      'trace-section-label',
+      `Tool sequence · ${tools.same} same · ${tools.added} added · ${tools.removed} removed`
+    )
+  );
+  const list = el('div', 'trace-tool-diff');
+  const glyph = { same: '=', added: '+', removed: '-' };
+  for (const step of tools.steps || []) {
+    const astep = step.a;
+    const bstep = step.b;
+    const shown = step.op === 'removed' ? astep : bstep;
+    if (!shown) continue;
+    const row = el('div', 'trace-tool-row ' + step.op);
+    row.append(el('span', 'trace-tool-op', glyph[step.op] || '?'));
+    row.append(el('span', 'trace-tool-name', shown.name));
+    if (shown.depth) row.append(el('span', 'trace-sub', 'depth ' + shown.depth));
+    if (shown.failed) row.append(el('span', 'trace-item-flag', 'failed'));
+    if (step.op === 'same') {
+      const aAt = fmtDuration(astep.offset_ms || 0);
+      const bAt = fmtDuration(bstep.offset_ms || 0);
+      row.append(el('span', 'trace-tool-offset', `${aAt} → ${bAt}`));
+    } else {
+      row.append(el('span', 'trace-tool-offset', '@' + fmtDuration(shown.offset_ms || 0)));
+    }
+    list.append(row);
+  }
+  if (!list.children.length) list.append(el('div', 'stats-empty', 'No tool calls in either trace.'));
+  block.append(list);
+  return block;
+}
+
+function renderCompareEvents(counts) {
+  const block = el('div', 'trace-compare-section');
+  block.append(el('div', 'trace-section-label', 'Event counts'));
+  const chips = el('div', 'trace-event-counts');
+  for (const count of counts || []) {
+    const delta = (Number(count.b) || 0) - (Number(count.a) || 0);
+    const chip = el('span', 'trace-count-chip' + (delta > 0 ? ' up' : delta < 0 ? ' down' : ''));
+    chip.append(el('span', 'trace-count-type', count.type));
+    chip.append(el('span', 'trace-count-num', `${count.a} → ${count.b}`));
+    if (delta) chip.append(el('span', 'trace-count-delta', (delta > 0 ? '+' : '') + delta));
+    chips.append(chip);
+  }
+  if (!chips.children.length) chips.append(el('div', 'stats-empty', 'No events in either trace.'));
+  block.append(chips);
+  return block;
+}
+
+function renderCompareText(title, td) {
+  const block = el('div', 'trace-compare-section');
+  const details = el('details', 'trace-text-diff');
+  const changed = (td.lines || []).filter((line) => line.op !== ' ').length;
+  details.append(
+    el('summary', '', `${title} · ${changed} changed line${changed === 1 ? '' : 's'}`)
+  );
+  const pre = el('pre', 'diff');
+  for (const line of td.lines || []) {
+    const cls = line.op === '+' ? 'add' : line.op === '-' ? 'del' : '';
+    pre.append(el('span', cls, line.op + line.text + '\n'));
+  }
+  details.append(pre);
+  if (td.truncated) details.append(el('div', 'trace-item-note', 'Diff truncated to the first 400 lines.'));
+  block.append(details);
+  return block;
 }
 
 function renderTraceDetail(tr) {
@@ -2909,11 +3158,17 @@ function renderTraceDetail(tr) {
     .join(' · ');
   copy.append(el('span', 'trace-detail-sub', sub));
   head.append(copy);
+  const actions = el('div', 'trace-actions');
+  const compare = el('button', 'trace-compare', 'Compare');
+  compare.type = 'button';
+  compare.title = 'Compare this trace with another';
+  compare.addEventListener('click', () => startTraceCompare(tr.id));
   const del = el('button', 'trace-delete', 'Delete');
   del.type = 'button';
   del.title = 'Delete this trace';
   del.addEventListener('click', () => deleteTrace(tr));
-  head.append(del);
+  actions.append(compare, del);
+  head.append(actions);
   detail.append(head);
   detail.append(renderTraceMeta(tr));
 

@@ -67,6 +67,10 @@ the browser.
   tasks in isolated workspaces, scores files, tools, events, verification, and
   cost, and compares against a baseline. Mock mode is deterministic and offline;
   `-mode real` measures an actual provider with the same tasks.
+- **Run traces** — eval runs and web chat turns save their timestamped event
+  streams. The web viewer filters and searches runs, replays the timeline, and
+  compares two runs side by side: metric deltas, fixed and new failures, an
+  aligned tool-call sequence, event counts, and prompt/answer diffs.
 - **MCP** — starts stdio JSON-RPC servers and exposes their tools as
   `mcp__<server>__<tool>`; `readOnlyHint` tools skip approval.
 - **Sessions** — saved after every step, resumable by id, number, or title,
@@ -263,9 +267,19 @@ metadata, prompt, verifier output, and a merged timeline of messages, tool
 calls, diffs, approvals, retries, and usage. Traces can be deleted from the
 detail pane.
 
+**Compare** diffs any two runs: click `Compare` on a trace, then pick the
+second one. The comparison shows both headers, metric deltas (duration, model
+and tool calls, tokens, cost, events), failures fixed in B versus newly
+introduced, warnings, an aligned tool-call sequence (added, removed, and shared
+calls via a longest-common-subsequence match), per-type event counts, and line
+diffs of the prompt and final answer when they differ. `Swap A/B` reverses the
+direction. Comparison is computed server-side, so it works the same for eval
+runs and live sessions.
+
 ```text
 GET    /api/traces?kind=eval|session&q=TEXT
 GET    /api/traces/{id}
+GET    /api/traces/compare?a=ID&b=ID
 DELETE /api/traces/{id}
 ```
 
@@ -794,7 +808,9 @@ daily bucketing, range and workspace filters, cache-hit math, per-model and
 per-tool aggregation, the hourly heatmap, legacy sessions without per-turn
 stats, and the `/api/analytics` endpoint. Trace coverage includes store
 round-trip, pruning and unsafe-ID rejection, eval trace persistence, live
-session capture, and the trace list/get/delete API. Environment coverage
+session capture, the trace list/get/delete API, and the compare API and engine
+(metric deltas, failure sets, tool-sequence alignment, event counts, text
+diffs). Environment coverage
 includes typed parsing, provider alias precedence, `.env` loading, and
 malformed-value errors. Index coverage includes Go AST symbols, regex parsers
 for the other supported languages, ignored directories, noise and binary files,

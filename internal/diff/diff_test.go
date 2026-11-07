@@ -106,3 +106,19 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+func TestLinesStructured(t *testing.T) {
+	lines := Lines("a\nb\nc", "a\nB\nc")
+	want := []Line{{Op: " ", Text: "a"}, {Op: "-", Text: "b"}, {Op: "+", Text: "B"}, {Op: " ", Text: "c"}}
+	if len(lines) != len(want) {
+		t.Fatalf("lines = %+v, want %+v", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("line %d = %+v, want %+v", i, lines[i], want[i])
+		}
+	}
+	if got := Lines("same\n", "same\n"); got != nil {
+		t.Fatalf("identical input returned lines: %+v", got)
+	}
+}

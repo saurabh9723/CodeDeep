@@ -129,3 +129,41 @@ func (s *Server) handleDeleteTrace(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// handleCompareTraces diffs two saved traces. The route is literal, so it wins
+// over GET /api/traces/{id} even though both match.
+func (s *Server) handleCompareTraces(w http.ResponseWriter, r *http.Request) {
+	if s.traces == nil {
+		writeError(w, http.StatusNotFound, "trace not found")
+		return
+	}
+	aID := strings.TrimSpace(r.URL.Query().Get("a"))
+	bID := strings.TrimSpace(r.URL.Query().Get("b"))
+	if aID == "" || bID == "" {
+		writeError(w, http.StatusBadRequest, "compare requires trace ids a and b")
+		return
+	}
+	if aID == bID {
+		writeError(w, http.StatusBadRequest, "compare requires two different traces")
+		return
+	}
+	a, err := s.traces.Load(aID)
+	if err != nil {
+		s.writeTraceLoadError(w, err)
+		return
+	}
+	b, err := s.traces.Load(bID)
+	if err != nil {
+		s.writeTraceLoadError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, trace.Compare(a, b))
+}
+
+func (s *Server) writeTraceLoadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "trace not found")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err.Error())
+}
