@@ -2,6 +2,7 @@
 # Build the binaries, run a real tool turn against the deterministic mock
 # provider, and verify the resulting file and session on disk.
 set -euo pipefail
+trap 'echo "e2e smoke failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP=$(mktemp -d)
@@ -250,7 +251,7 @@ grep -q '"status": "in_progress"' "$TODO_FILE"
 printf '/todos\n/stats 7\n/quit\n' | env DEEPSEEK_API_KEY=test \
   CODEAGENT_BASE_URL="http://127.0.0.1:$TODOPORT" \
   CODEAGENT_SESSIONS_DIR="$TMP/todo-sessions" \
-  "$TMP/codedeep$EXT" -cwd "$TMP/todo-work" -resume last -plain >"$TMP/todo-repl.txt"
+  "$TMP/codedeep$EXT" -cwd "$TMP/todo-work" -resume last -repl -plain >"$TMP/todo-repl.txt"
 grep -q "Plan" "$TMP/todo-repl.txt"
 grep -q "\[~\] write the mock build command" "$TMP/todo-repl.txt"
 grep -q "Observability" "$TMP/todo-repl.txt"
@@ -272,7 +273,7 @@ grep -q "description: how the mock project builds" "$TMP/memory-work/.codedeep/m
 printf '/memory mock\n/quit\n' | env DEEPSEEK_API_KEY=test \
   CODEAGENT_BASE_URL="http://127.0.0.1:$MEMPORT" \
   CODEAGENT_SESSIONS_DIR="$TMP/memory-sessions" \
-  "$TMP/codedeep$EXT" -cwd "$TMP/memory-work" -plain >"$TMP/memory-repl.txt"
+  "$TMP/codedeep$EXT" -cwd "$TMP/memory-work" -repl -plain >"$TMP/memory-repl.txt"
 grep -q "mock-build-command" "$TMP/memory-repl.txt"
 grep -q "Memory matching" "$TMP/memory-repl.txt"
 

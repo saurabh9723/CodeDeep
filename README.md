@@ -299,7 +299,8 @@ the destination and `-no-traces` to skip capture entirely.
 - `-debug` — verbose logging to stderr.
 
 Chat-only flags: `-p/-prompt`, `-c/-continue`, `-r/-resume`, `-json`,
-`-reasoning`, `-plain`.
+`-reasoning`, `-plain`, `-repl`. With `-repl`, piped stdin is read as REPL
+commands instead of a one-shot prompt, which makes the REPL scriptable in CI.
 
 ## Configuration
 

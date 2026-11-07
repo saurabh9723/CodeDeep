@@ -111,6 +111,7 @@ Chat flags:
   -json              emit NDJSON events instead of the terminal transcript
   -reasoning         show the model's reasoning stream
   -plain             disable colors
+  -repl              start the REPL even when stdin is piped (for scripting)
 
 Eval flags:
   -mode mock|real    response source (default mock, fully offline)
@@ -229,6 +230,7 @@ type chatFlags struct {
 	resume    string
 	plain     bool
 	reasoning bool
+	repl      bool
 }
 
 func cmdChat(args []string) int {
@@ -247,6 +249,7 @@ func cmdChat(args []string) int {
 	fs.BoolVar(&cf.jsonOut, "json", false, "emit NDJSON events (one-shot only)")
 	fs.BoolVar(&cf.reasoning, "reasoning", false, "show the reasoning stream")
 	fs.BoolVar(&cf.plain, "plain", false, "disable colors")
+	fs.BoolVar(&cf.repl, "repl", false, "start the REPL even when stdin is not a terminal")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -259,7 +262,7 @@ func cmdChat(args []string) int {
 	if prompt == "" && len(fs.Args()) > 0 {
 		prompt = strings.TrimSpace(strings.Join(fs.Args(), " "))
 	}
-	piped := !stdinIsTerminal()
+	piped := !cf.repl && !stdinIsTerminal()
 	if prompt == "-" {
 		data, err := readStdin()
 		if err != nil {
